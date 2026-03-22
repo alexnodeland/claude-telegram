@@ -77,3 +77,23 @@ setup:
 # Install dependencies only
 install:
     bun install
+
+# ─── Release ────────────────────────────────────────────────────────────────
+
+# Tag a release (e.g., just release 1.2.0)
+release version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TAG="v{{version}}"
+    # Ensure working tree is clean
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "❌ Working tree is dirty — commit or stash changes first"
+        exit 1
+    fi
+    # Update version in package.json
+    bun run --bun -e "const pkg = await Bun.file('package.json').json(); pkg.version = '{{version}}'; await Bun.write('package.json', JSON.stringify(pkg, null, 2) + '\n');"
+    git add package.json
+    git commit -m "release: ${TAG}"
+    git tag -a "${TAG}" -m "Release ${TAG}"
+    echo "✅ Tagged ${TAG}"
+    echo "   Push with: git push origin main ${TAG}"
