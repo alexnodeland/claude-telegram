@@ -4,6 +4,7 @@
 
 **Control Claude Code from Telegram — run tasks, review diffs, and ship code from your phone.**
 
+[![npm](https://img.shields.io/npm/v/@alexnodeland/claude-telegram?color=cc785c)](https://www.npmjs.com/package/@alexnodeland/claude-telegram)
 [![GitHub Release](https://img.shields.io/github/v/release/alexnodeland/claude-telegram?style=flat&color=cc785c)](https://github.com/alexnodeland/claude-telegram/releases)
 [![CI](https://img.shields.io/github/actions/workflow/status/alexnodeland/claude-telegram/ci.yml?branch=main&label=CI)](https://github.com/alexnodeland/claude-telegram/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -54,19 +55,54 @@ Claude Telegram gives you full Claude Code access from any Telegram client — p
 
 ## Quick start
 
-**1. Create a Telegram bot** — message [@BotFather](https://t.me/BotFather), send `/newbot`, copy the token.
+### Prerequisites
 
-**2. Install and run:**
+- [Bun](https://bun.sh) >= 1.1
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) >= 2.1
+- A Telegram bot token (message [@BotFather](https://t.me/BotFather), send `/newbot`, copy the token)
+
+### Install and run
 
 ```bash
-git clone https://github.com/alexnodeland/claude-telegram.git
-cd claude-telegram
-bun install
+# Install the package
+bun add -g @alexnodeland/claude-telegram
+
+# Set your bot token
 export TELEGRAM_BOT_TOKEN=your_token_here
-bun run start:orchestrator
+
+# Start the orchestrator
+claude-telegram-orchestrator
 ```
 
-**3. Pair your Telegram account** — send `/start` to your bot, then enter the pairing code shown in your terminal.
+Or run directly without installing:
+
+```bash
+TELEGRAM_BOT_TOKEN=your_token_here bunx @alexnodeland/claude-telegram/src/orchestrator.ts
+```
+
+### Pair your Telegram account
+
+1. Send `/start` to your bot in Telegram
+2. An already-approved user sends `/approve <CODE>` with the 6-character pairing code
+
+To pre-approve users on first run, set `TELEGRAM_ALLOWED_USERS` with comma-separated Telegram user IDs:
+
+```bash
+TELEGRAM_ALLOWED_USERS=783772449 claude-telegram-orchestrator
+```
+
+### Running as a daemon
+
+A built-in script sets up launchd (macOS) or systemd (Linux) automatically:
+
+```bash
+claude-telegram-daemon install    # install and start
+claude-telegram-daemon status     # check if running
+claude-telegram-daemon logs       # tail logs
+claude-telegram-daemon uninstall  # stop and remove
+```
+
+Auto-restarts on crash and starts on login. See the [orchestrator docs](docs/orchestrator-mode.md#running-as-a-daemon) for manual setup options.
 
 > [!TIP]
 > The **orchestrator mode** above is standalone and manages its own Claude sessions. There's also a [channel mode](docs/channel-mode.md) that attaches Telegram to an existing Claude Code session as an MCP plugin.
@@ -173,18 +209,11 @@ Anything that isn't a command is sent as a prompt to Claude.
 | [Channel Mode](docs/channel-mode.md) | MCP channel plugin setup, pairing, access commands, tools |
 | [Architecture](docs/architecture.md) | System design, module map, security model, data flow |
 | [Changelog](CHANGELOG.md) | Release history |
+| [Contributing](CONTRIBUTING.md) | Development setup, code style, testing, pull requests |
 
-## Development
+## Contributing
 
-```bash
-just setup             # Install deps + configure git hooks
-just dev-orchestrator  # Watch mode
-just ci                # Typecheck + lint + test (112 tests)
-just fix               # Auto-fix lint/format
-just release 1.1.0    # Tag a release
-```
-
-See [CLAUDE.md](CLAUDE.md) for architecture details and contributor guidelines.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
 
 ## License
 

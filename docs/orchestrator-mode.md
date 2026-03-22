@@ -4,17 +4,27 @@ The orchestrator runs as a standalone process that manages Claude Code sessions 
 
 ## Setup
 
+### Install
+
+```bash
+bun add -g @alexnodeland/claude-telegram
+```
+
 ### Running
 
 ```bash
-# Production
-bun run start:orchestrator
+# Set your bot token
+export TELEGRAM_BOT_TOKEN=your_token_here
 
-# Development (watch mode)
-bun run dev:orchestrator
+# Start the orchestrator
+claude-telegram-orchestrator
+```
 
-# Or with just
-just dev-orchestrator
+For development (from a local clone):
+
+```bash
+bun run start:orchestrator        # Production
+just dev-orchestrator             # Watch mode
 ```
 
 ### First-time pairing
@@ -30,10 +40,77 @@ To pre-approve users without pairing:
 TELEGRAM_ALLOWED_USERS=783772449,123456 bun run start:orchestrator
 ```
 
-### Always-on with tmux
+### Running as a daemon
+
+**macOS (launchd):**
+
+Create `~/Library/LaunchAgents/com.claude-telegram.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.claude-telegram</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOU/.bun/bin/bun</string>
+        <string>run</string>
+        <string>/Users/YOU/.bun/install/global/node_modules/@alexnodeland/claude-telegram/src/orchestrator.ts</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TELEGRAM_BOT_TOKEN</key>
+        <string>your_token_here</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/Users/YOU/.bun/bin</string>
+    </dict>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/claude-telegram.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/claude-telegram.log</string>
+</dict>
+</plist>
+```
 
 ```bash
-tmux new-session -d -s claude 'bun run start:orchestrator'
+launchctl load ~/Library/LaunchAgents/com.claude-telegram.plist    # start
+launchctl unload ~/Library/LaunchAgents/com.claude-telegram.plist  # stop
+```
+
+**Linux (systemd):**
+
+Create `~/.config/systemd/user/claude-telegram.service`:
+
+```ini
+[Unit]
+Description=Claude Telegram Orchestrator
+After=network.target
+
+[Service]
+ExecStart=%h/.bun/bin/bun run %h/.bun/install/global/node_modules/@alexnodeland/claude-telegram/src/orchestrator.ts
+Environment=TELEGRAM_BOT_TOKEN=your_token_here
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now claude-telegram   # start + enable on boot
+systemctl --user status claude-telegram         # check status
+journalctl --user -u claude-telegram -f         # view logs
+```
+
+**tmux (any platform):**
+
+```bash
+tmux new-session -d -s claude 'claude-telegram-orchestrator'
 tmux attach -t claude   # re-attach any time
 ```
 

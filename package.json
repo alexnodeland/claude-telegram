@@ -7,7 +7,8 @@
   "type": "module",
   "bin": {
     "claude-telegram": "./src/index.ts",
-    "claude-telegram-orchestrator": "./src/orchestrator.ts"
+    "claude-telegram-orchestrator": "./src/orchestrator.ts",
+    "claude-telegram-daemon": "./scripts/daemon.sh"
   },
   "scripts": {
     "start": "bun run src/index.ts",
@@ -36,6 +37,7 @@
   },
   "files": [
     "src/",
+    "scripts/",
     "LICENSE",
     "README.md",
     "CHANGELOG.md"

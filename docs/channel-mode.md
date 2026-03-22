@@ -15,7 +15,13 @@ This is different from orchestrator mode — instead of managing its own session
 
 ## Setup
 
-### 1. Configure MCP
+### 1. Install
+
+```bash
+bun add -g @alexnodeland/claude-telegram
+```
+
+### 2. Configure MCP
 
 Add to `.mcp.json` in your project root (or `~/.claude.json` for global access):
 
@@ -24,7 +30,7 @@ Add to `.mcp.json` in your project root (or `~/.claude.json` for global access):
   "mcpServers": {
     "telegram": {
       "command": "bun",
-      "args": ["run", "/path/to/claude-telegram/src/index.ts"],
+      "args": ["run", "PACKAGE_PATH/src/index.ts"],
       "env": {
         "TELEGRAM_BOT_TOKEN": "your_token_here"
       }
@@ -32,6 +38,8 @@ Add to `.mcp.json` in your project root (or `~/.claude.json` for global access):
   }
 }
 ```
+
+Replace `PACKAGE_PATH` with the installed package location (run `bun pm ls -g` to find it, typically `~/.bun/install/global/node_modules/@alexnodeland/claude-telegram`).
 
 See [`.mcp.json.example`](../.mcp.json.example) for a template.
 
