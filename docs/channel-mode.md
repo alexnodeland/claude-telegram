@@ -89,16 +89,21 @@ These are the tools Claude uses internally to communicate through Telegram. You 
 
 ## How it works
 
-```
-Telegram user sends message
-   ↓
-Channel plugin (long-polls Telegram API)
-   ↓ pushes MCP notification
-Claude Code session
-   ↓ reads event, processes, calls tools
-telegram_reply / telegram_send_file / etc.
-   ↓
-Telegram user sees response
+```mermaid
+---
+config:
+  layout: elk
+---
+flowchart TD
+  A["📱 Telegram user\nsends message"] --> B["Channel plugin\n(long-polls Telegram API)"]
+  B -->|"MCP notification"| C["🤖 Claude Code session"]
+  C -->|"reads event, processes"| D["Calls tools:\ntelegram_reply\ntelegram_send_file\ntelegram_react"]
+  D --> E["📱 Telegram user\nsees response"]
+
+  style A fill:#26A5E4,color:#fff,stroke:none
+  style C fill:#cc785c,color:#fff,stroke:none
+  style E fill:#26A5E4,color:#fff,stroke:none
+  style B fill:#1a1a2e,color:#fff,stroke:#444
 ```
 
 The channel plugin maintains a typing indicator keepalive — while Claude is working, the user sees "typing..." in Telegram.

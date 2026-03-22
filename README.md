@@ -16,10 +16,20 @@
 
 A local bridge between Telegram and [Claude Code](https://code.claude.com). Send a message from your phone, Claude reads your codebase, edits files, runs commands, and replies — everything stays on your machine.
 
-```
-You (Telegram)  →  claude-telegram (local)  →  Claude Code (your machine)
-    "fix the auth bug,       polls Telegram,          reads code, edits files,
-     run tests, commit"      streams results          runs tests, commits
+```mermaid
+---
+config:
+  layout: elk
+---
+graph LR
+  A["📱 You\n(Telegram)"] -->|message| B["🖥️ claude-telegram\n(runs locally)"]
+  B -->|polls & streams| A
+  B -->|spawns subprocess| C["🤖 Claude Code\n(your machine)"]
+  C -->|NDJSON stream| B
+
+  style A fill:#26A5E4,color:#fff,stroke:none
+  style B fill:#1a1a2e,color:#fff,stroke:#444
+  style C fill:#cc785c,color:#fff,stroke:none
 ```
 
 ## What you can do

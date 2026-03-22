@@ -100,16 +100,25 @@ If no response is given within 2 minutes, the action is auto-denied.
 
 ### How the relay works
 
-```
-Claude subprocess
-   ↓ needs permission
-Sidecar MCP server (permission-relay.ts)
-   ↓ POST to 127.0.0.1
-Relay HTTP server (relay-server.ts)
-   ↓ holds connection open
-Orchestrator sends Telegram inline keyboard
-   ↓ user taps button
-Response flows back through the chain
+```mermaid
+---
+config:
+  layout: elk
+---
+flowchart LR
+  A["🤖 Claude\nsubprocess"] -->|"needs permission"| B["Sidecar MCP\npermission-relay.ts"]
+  B -->|"POST 127.0.0.1"| C["Relay HTTP\nrelay-server.ts"]
+  C -->|"holds connection"| D["Orchestrator"]
+  D -->|"inline keyboard"| E["📱 Telegram"]
+  E -->|"user taps button"| D
+  D -->|"resolvePrompt()"| C
+  C -->|"HTTP response"| B
+  B -->|"tool result"| A
+
+  style A fill:#cc785c,color:#fff,stroke:none
+  style E fill:#26A5E4,color:#fff,stroke:none
+  style C fill:#1a1a2e,color:#fff,stroke:#444
+  style D fill:#1a1a2e,color:#fff,stroke:#444
 ```
 
 ## Real-time streaming

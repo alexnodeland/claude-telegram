@@ -26,6 +26,48 @@ claude-telegram/
 └── package.json
 ```
 
+## Module map
+
+```mermaid
+---
+config:
+  layout: elk
+---
+graph TD
+  subgraph "Entry Points"
+    IDX["index.ts\nChannel mode"]
+    ORC["orchestrator.ts\nOrchestrator mode"]
+  end
+
+  subgraph "Shared"
+    TG["telegram.ts\nBot API client"]
+    HTML["html.ts\nHTML formatting"]
+    ACC["access.ts\nPairing + allowlist"]
+    CFG["config.ts\nConfig loading"]
+    TYP["types.ts\nInterfaces"]
+  end
+
+  subgraph "Orchestrator only"
+    CMD["commands.ts\nCommand parser"]
+    SES["sessions.ts\nSession manager"]
+    STR["streaming.ts\nMulti-bubble renderer"]
+    REL["relay-server.ts\nHTTP relay"]
+    PRM["permission-relay.ts\nSidecar MCP"]
+  end
+
+  IDX --> TG & HTML & ACC & CFG & TYP
+  ORC --> TG & HTML & ACC & CFG & TYP
+  ORC --> CMD & SES & STR & REL
+  STR --> TG & HTML
+  CMD --> TYP
+  PRM -.->|"HTTP POST"| REL
+
+  style IDX fill:#cc785c,color:#fff,stroke:none
+  style ORC fill:#cc785c,color:#fff,stroke:none
+  style TG fill:#26A5E4,color:#fff,stroke:none
+  style PRM fill:#555,color:#fff,stroke:none
+```
+
 ## Modules
 
 ### Entry points
@@ -96,47 +138,67 @@ claude-telegram/
 
 ### Orchestrator mode — prompt execution
 
-```
-User sends "fix the bug" in Telegram
-   ↓
-Orchestrator poll loop receives message
-   ↓
-parseCommand() → { type: "prompt", text: "fix the bug" }
-   ↓
-handlePrompt() → runQuery()
-   ↓
-Bun.spawn(["claude", "-p", "--stream-json", "--permission-prompt-tool", ...])
-   ↓
-NDJSON stream processed line by line:
-   ├─ { type: "system", subtype: "init" }     → extract session_id
-   ├─ { type: "assistant", message: { content: [...] } }
-   │   ├─ text block                           → renderer.sendText()
-   │   └─ tool_use block                       → renderer.showToolCall()
-   ├─ { type: "user", message: { content: [tool_result] } }
-   │                                           → renderer.showToolResult()
-   └─ { type: "result" }                       → extract cost, update session
+```mermaid
+---
+config:
+  layout: elk
+---
+flowchart TD
+  A["📱 User sends message\nin Telegram"] --> B["Orchestrator poll loop"]
+  B --> C["parseCommand()"]
+  C --> D["handlePrompt() → runQuery()"]
+  D --> E["Bun.spawn claude -p\n--stream-json"]
+
+  E --> F{"NDJSON\nstream"}
+  F -->|"system:init"| G["Extract session_id"]
+  F -->|"assistant text"| H["renderer.sendText()"]
+  F -->|"assistant tool_use"| I["renderer.showToolCall()"]
+  F -->|"user tool_result"| J["renderer.showToolResult()"]
+  F -->|"result"| K["Extract cost,\nupdate session"]
+
+  H --> L["📱 Telegram\nmessage bubble"]
+  I --> L
+  J --> L
+  K --> L
+
+  style A fill:#26A5E4,color:#fff,stroke:none
+  style E fill:#cc785c,color:#fff,stroke:none
+  style L fill:#26A5E4,color:#fff,stroke:none
+  style F fill:#333,color:#fff,stroke:#666
 ```
 
 ### Permission relay flow
 
-```
-Claude subprocess wants to run Bash("npm test")
-   ↓
-Claude calls prompt_handler MCP tool
-   ↓
-permission-relay.ts POSTs to relay-server.ts
-   ↓
-Orchestrator's onPrompt callback fires:
-   ├─ Check session/project auto-approvals → resolve immediately if approved
-   └─ Send Telegram inline keyboard with 4 buttons
-   ↓
-User taps "Allow Bash for session"
-   ↓
-handleCallbackQuery() → approveToolForSession() + resolvePrompt()
-   ↓
-HTTP response flows back to sidecar → Claude proceeds
-   ↓
-Future Bash prompts auto-resolve (no Telegram message)
+```mermaid
+---
+config:
+  layout: elk
+---
+sequenceDiagram
+  participant Claude as 🤖 Claude subprocess
+  participant Sidecar as permission-relay.ts
+  participant Relay as relay-server.ts
+  participant Orch as Orchestrator
+  participant TG as 📱 Telegram
+
+  Claude->>Sidecar: Needs permission for Bash("npm test")
+  Sidecar->>Relay: POST /relay/prompt
+  Note over Relay: Connection held open
+
+  Relay->>Orch: onPrompt callback
+  alt Tool auto-approved (session/project)
+    Orch->>Relay: resolvePrompt(allow)
+    Note over Orch: No Telegram message
+  else Needs user approval
+    Orch->>TG: Inline keyboard (Allow once / Session / Project / Deny)
+    TG->>Orch: User taps "Allow Bash for session"
+    Orch->>Orch: approveToolForSession()
+    Orch->>Relay: resolvePrompt(allow)
+  end
+
+  Relay->>Sidecar: HTTP response { behavior: "allow" }
+  Sidecar->>Claude: Tool result → Claude proceeds
+  Note over Orch: Future Bash prompts auto-resolve
 ```
 
 ## Security model
