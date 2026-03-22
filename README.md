@@ -82,40 +82,65 @@ Anything that isn't a command is sent as a prompt to Claude.
 
 ## How it looks
 
-**Real-time streaming** — each tool call is a separate message:
+<table>
+<tr>
+<td width="50%">
 
-```
-⚙️ Step 3 · Read · …/src/auth.ts       ← status updates in place
+**Real-time streaming** — tool calls stream as separate messages with a live status bar and cost tracking.
 
-📖 Read
-src/auth.ts                              ← tool call with result preview
-┌─────────────────────────────┐
-│ export function verify...   │
-└─────────────────────────────┘
+</td>
+<td width="50%">
 
-💻 Bash
-npm test                                 ← command + output
-┌─────────────────────────────┐
-│ 47 passed, 0 failed         │
-└─────────────────────────────┘
+**Permission prompts** — approve once, for the session, or always for the project.
 
-✅ Done · $0.0042 · 3 turns              ← final cost
-```
+</td>
+</tr>
+<tr>
+<td>
 
-**Permission prompts** with granular options:
+<img src="docs/images/working.jpg" width="300" alt="Streaming tool calls in Telegram" />
 
-```
-🔒 Permission required
-Tool: Bash — Run a shell command
-┌─────────────────────────────┐
-│ command: npm test            │
-└─────────────────────────────┘
-Expires in 2 min
+</td>
+<td>
 
-[✅ Allow once]  [❌ Deny]
-[✅ Allow Bash for session]
-[✅ Always allow Bash in project]
-```
+<img src="docs/images/permissions.jpg" width="300" alt="Permission prompt with granular options" />
+
+</td>
+</tr>
+<tr>
+<td>
+
+**Directory browser** — navigate folders, bookmark shortcuts, tap to start a session.
+
+</td>
+<td>
+
+**`/cc` command menu** — run Claude Code slash commands and switch modes from the chat.
+
+</td>
+</tr>
+<tr>
+<td>
+
+<img src="docs/images/new.jpg" width="300" alt="Navigable directory browser" />
+
+</td>
+<td>
+
+<img src="docs/images/cc.jpg" width="300" alt="/cc command menu and mode switching" />
+
+</td>
+</tr>
+<tr>
+<td colspan="2">
+
+**Session management** — list sessions with auto-generated titles, tap to resume.
+
+<img src="docs/images/sessions.jpg" width="300" alt="Session list with titles and resume buttons" />
+
+</td>
+</tr>
+</table>
 
 ## Security
 
