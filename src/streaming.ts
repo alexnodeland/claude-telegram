@@ -1,4 +1,4 @@
-import { escapeHtml, fmt } from "./html.js";
+import { escapeHtml, fmt, markdownToTelegramHtml } from "./html.js";
 import type { TelegramClient } from "./telegram.js";
 
 const MAX_TG_LENGTH = 4096;
@@ -33,7 +33,7 @@ export class StreamingRenderer {
     const trimmed = text.trim();
     if (!trimmed) return;
     this.lastToolMessageId = null; // new text block clears tool context
-    await sendLongMessage(this.tg, this.chatId, escapeHtml(trimmed));
+    await sendLongMessage(this.tg, this.chatId, markdownToTelegramHtml(trimmed));
   }
 
   async showToolCall(toolName: string, input: unknown): Promise<void> {

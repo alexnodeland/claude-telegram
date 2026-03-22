@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { escapeHtml, fmt } from "../src/html.js";
+import { escapeHtml, fmt, markdownToTelegramHtml } from "../src/html.js";
 
 describe("escapeHtml", () => {
   test("escapes ampersand", () => {
@@ -62,5 +62,72 @@ describe("fmt helpers", () => {
 
   test("strikethrough wraps in <s> and escapes", () => {
     expect(fmt.strikethrough("removed")).toBe("<s>removed</s>");
+  });
+});
+
+describe("markdownToTelegramHtml", () => {
+  test("converts bold", () => {
+    expect(markdownToTelegramHtml("hello **world**")).toBe("hello <b>world</b>");
+  });
+
+  test("converts italic with asterisks", () => {
+    expect(markdownToTelegramHtml("hello *world*")).toBe("hello <i>world</i>");
+  });
+
+  test("converts inline code", () => {
+    expect(markdownToTelegramHtml("use `foo()` here")).toBe("use <code>foo()</code> here");
+  });
+
+  test("converts fenced code blocks", () => {
+    const input = "before\n```ts\nconst x = 1;\n```\nafter";
+    expect(markdownToTelegramHtml(input)).toBe(
+      'before\n<pre><code class="language-ts">const x = 1;</code></pre>\nafter',
+    );
+  });
+
+  test("converts fenced code blocks without language", () => {
+    const input = "```\nhello\n```";
+    expect(markdownToTelegramHtml(input)).toBe("<pre>hello</pre>");
+  });
+
+  test("converts headers to bold", () => {
+    expect(markdownToTelegramHtml("# Title")).toBe("<b>Title</b>");
+    expect(markdownToTelegramHtml("## Subtitle")).toBe("<b>Subtitle</b>");
+  });
+
+  test("converts strikethrough", () => {
+    expect(markdownToTelegramHtml("~~removed~~")).toBe("<s>removed</s>");
+  });
+
+  test("converts links", () => {
+    expect(markdownToTelegramHtml("[click](https://example.com)")).toBe(
+      '<a href="https://example.com">click</a>',
+    );
+  });
+
+  test("converts bullet lists", () => {
+    expect(markdownToTelegramHtml("- item one\n- item two")).toBe("• item one\n• item two");
+  });
+
+  test("escapes HTML in regular text", () => {
+    expect(markdownToTelegramHtml("a < b & c > d")).toBe("a &lt; b &amp; c &gt; d");
+  });
+
+  test("escapes HTML inside code blocks", () => {
+    const input = "```\n<div>hi</div>\n```";
+    expect(markdownToTelegramHtml(input)).toBe("<pre>&lt;div&gt;hi&lt;/div&gt;</pre>");
+  });
+
+  test("escapes HTML inside inline code", () => {
+    expect(markdownToTelegramHtml("use `<b>tag</b>`")).toBe("use <code>&lt;b&gt;tag&lt;/b&gt;</code>");
+  });
+
+  test("handles mixed formatting", () => {
+    const input = "**bold** and *italic* and `code`";
+    expect(markdownToTelegramHtml(input)).toBe("<b>bold</b> and <i>italic</i> and <code>code</code>");
+  });
+
+  test("passes plain text through with only HTML escaping", () => {
+    expect(markdownToTelegramHtml("hello world")).toBe("hello world");
   });
 });
