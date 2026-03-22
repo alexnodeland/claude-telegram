@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Use just if available, fall back to bun directly
+if command -v just &>/dev/null; then
+    just ci
+else
+    echo "==> Typecheck"
+    bun run typecheck
+    echo "==> Lint + format check"
+    bunx biome check src/
+    echo "==> Tests"
+    bun test
+fi
+
+echo "==> All checks passed"
