@@ -8,6 +8,7 @@ BUN="$(which bun 2>/dev/null || echo "$HOME/.bun/bin/bun")"
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ORCHESTRATOR="$SCRIPT_DIR/src/orchestrator.ts"
 TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+CLAUDE_BIN="${CLAUDE_BIN:-$(which claude 2>/dev/null || echo "claude")}"
 
 if [ -z "$TOKEN" ] && [ "$1" != "uninstall" ] && [ "$1" != "status" ] && [ "$1" != "logs" ]; then
   echo "Error: TELEGRAM_BOT_TOKEN is not set"
@@ -37,6 +38,8 @@ install_launchd() {
     <dict>
         <key>TELEGRAM_BOT_TOKEN</key>
         <string>$TOKEN</string>
+        <key>CLAUDE_BIN</key>
+        <string>$CLAUDE_BIN</string>
         <key>PATH</key>
         <string>/usr/local/bin:/usr/bin:/bin:$HOME/.bun/bin</string>
     </dict>
@@ -93,6 +96,7 @@ After=network.target
 [Service]
 ExecStart=$BUN run $ORCHESTRATOR
 Environment=TELEGRAM_BOT_TOKEN=$TOKEN
+Environment=CLAUDE_BIN=$CLAUDE_BIN
 Restart=on-failure
 RestartSec=5
 

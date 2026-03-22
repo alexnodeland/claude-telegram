@@ -63,6 +63,8 @@ Create `~/Library/LaunchAgents/com.claude-telegram.plist`:
     <dict>
         <key>TELEGRAM_BOT_TOKEN</key>
         <string>your_token_here</string>
+        <key>CLAUDE_BIN</key>
+        <string>/Users/YOU/.local/bin/claude</string>
         <key>PATH</key>
         <string>/usr/local/bin:/usr/bin:/bin:/Users/YOU/.bun/bin</string>
     </dict>
@@ -93,6 +95,7 @@ After=network.target
 [Service]
 ExecStart=%h/.bun/bin/bun run %h/.bun/install/global/node_modules/@alexnodeland/claude-telegram/src/orchestrator.ts
 Environment=TELEGRAM_BOT_TOKEN=your_token_here
+Environment=CLAUDE_BIN=%h/.local/bin/claude
 Restart=on-failure
 RestartSec=5
 
@@ -230,6 +233,7 @@ Sessions are persisted to `~/.claude/channels/telegram/sessions.json`.
 | `ORCHESTRATOR_DEFAULT_CWD` | `$HOME` | Default directory for `/new` without a path |
 | `ORCHESTRATOR_MAX_TURNS` | `50` | Max agentic turns per prompt |
 | `ORCHESTRATOR_MODEL` | *(system default)* | Default Claude model |
+| `CLAUDE_BIN` | `claude` | Absolute path to the `claude` CLI binary (useful when `$PATH` is limited, e.g. in daemons) |
 | `TELEGRAM_ALLOWED_USERS` | *(none)* | Comma-separated Telegram user IDs to pre-approve |
 
 See [`.env.example`](../.env.example) for a template.

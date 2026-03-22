@@ -348,6 +348,7 @@ const MAX_TURNS = Number(process.env.ORCHESTRATOR_MAX_TURNS ?? "50");
 let globalModel = process.env.ORCHESTRATOR_MODEL;
 
 // Absolute path to the sidecar script
+const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "claude";
 const RELAY_SCRIPT = resolve(import.meta.dir, "permission-relay.ts");
 
 process.stderr.write(
@@ -1258,7 +1259,7 @@ async function runQuery(
   await writeFile(mcpConfigPath, JSON.stringify(mcpConfig));
 
   const args = [
-    "claude",
+    CLAUDE_BIN,
     "-p",
     "--output-format",
     "stream-json",
