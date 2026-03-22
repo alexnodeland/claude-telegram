@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-03-22
+
+### Added
+
+- **Project MCP server loading** — orchestrator reads the target directory's `.mcp.json` and merges project MCP servers into spawned Claude CLI sessions. Projects with MCP servers (e.g., Slack, Jira, Confluence) now work out of the box via `/new`.
+- **Explicit setting sources** — passes `--setting-sources user,project,local` to ensure project hooks and permissions are loaded in `-p` mode.
+- **PATH augmentation** — spawned Claude CLI processes include `/opt/homebrew/bin` in PATH, fixing MCP server startup failures when running as a launchd daemon with a restricted PATH.
+
 ## [0.2.1] - 2026-03-22
 
 ### Fixed

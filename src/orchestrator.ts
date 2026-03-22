@@ -1242,10 +1242,26 @@ async function runQuery(
   const isResume = session.sessionId !== "pending";
   const model = session.model ?? globalModel;
 
-  // Write temp MCP config for the permission relay sidecar
+  // Read project .mcp.json so spawned sessions get the project's MCP servers.
+  // In -p mode the workspace trust dialog is skipped, which may prevent
+  // .mcp.json servers from being auto-enabled. Merging them here is defensive.
+  let projectMcpServers: Record<string, unknown> = {};
+  try {
+    const raw = await readFile(join(session.cwd, ".mcp.json"), "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed?.mcpServers && typeof parsed.mcpServers === "object") {
+      projectMcpServers = parsed.mcpServers;
+    }
+  } catch {
+    // No .mcp.json or invalid — fine, not every project has one
+  }
+
+  // Write temp MCP config: project servers + permission relay sidecar.
+  // Relay is spread last so a project can't shadow it.
   const mcpConfigPath = `/tmp/telegram-relay-${chatId}-${process.pid}.json`;
   const mcpConfig = {
     mcpServers: {
+      ...projectMcpServers,
       telegram_relay: {
         command: "bun",
         args: ["run", RELAY_SCRIPT],
@@ -1266,6 +1282,8 @@ async function runQuery(
     "--verbose",
     "--max-turns",
     String(MAX_TURNS),
+    "--setting-sources",
+    "user,project,local",
     "--mcp-config",
     mcpConfigPath,
     "--permission-prompt-tool",
@@ -1295,11 +1313,16 @@ async function runQuery(
       `    prompt: ${prompt.slice(0, 80)}${prompt.length > 80 ? "…" : ""}\n`,
   );
 
+  // Ensure homebrew/nvm paths are available — the launchd plist PATH is minimal
+  const extraPaths = ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"];
+  const currentPath = process.env.PATH ?? "";
+  const mergedPath = [...extraPaths.filter((p) => !currentPath.includes(p)), currentPath].join(":");
+
   const proc = Bun.spawn(args, {
     cwd: session.cwd,
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env },
+    env: { ...process.env, PATH: mergedPath },
   });
 
   activeProcs.set(chatId, proc);

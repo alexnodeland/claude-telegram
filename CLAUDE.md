@@ -48,6 +48,9 @@ All Telegram messages use `parse_mode: "HTML"` (not Markdown). Telegram's legacy
 ### Session titles
 Sessions capture auto-generated titles from Claude's first text response (or `conversation_name` from the init message). `/sessions` and `/resume` display titles instead of opaque UUIDs. `findByTitle()` enables fuzzy resume by title substring.
 
+### Project MCP server loading
+When spawning a session via `/new`, the orchestrator reads the target directory's `.mcp.json` and merges those MCP servers into the `--mcp-config` passed to the Claude CLI subprocess. This ensures project-level MCP servers are available even in `-p` mode where the workspace trust dialog is skipped. The `--setting-sources user,project,local` flag is also passed explicitly to load all settings layers (hooks, permissions). The spawned process PATH is augmented with `/opt/homebrew/bin` to handle launchd's restricted PATH.
+
 ### `/cc` slash command pass-through
 `/cc <command>` forwards Claude Code slash commands (commit, review-pr, plan, etc.) to the active session. `/cc` alone shows an interactive menu of common commands.
 
