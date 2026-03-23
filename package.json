@@ -1,6 +1,6 @@
 {
   "name": "@alexnodeland/claude-telegram",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Claude Code Channel plugin + standalone orchestrator bridging Telegram to Claude Code sessions",
   "module": "src/index.ts",
   "main": "src/index.ts",
