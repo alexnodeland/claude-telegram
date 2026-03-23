@@ -35,15 +35,22 @@ export function markdownToTelegramHtml(md: string): string {
   const PLACEHOLDER_PREFIX = "\u2060CBLK";
   const PLACEHOLDER_SUFFIX = "CBLK\u2060";
 
-  // 1. Extract fenced code blocks into placeholders
+  // 1. Extract fenced code blocks and tables into placeholders
   const codeBlocks: string[] = [];
-  const withPlaceholders = md.replace(/```(\w*)\n([\s\S]*?)```/g, (_match, lang: string, code: string) => {
+  let withPlaceholders = md.replace(/```(\w*)\n([\s\S]*?)```/g, (_match, lang: string, code: string) => {
     const escaped = escapeHtml(code.replace(/\n$/, ""));
     const html = lang
       ? `<pre><code class="language-${escapeHtml(lang)}">${escaped}</code></pre>`
       : `<pre>${escaped}</pre>`;
     codeBlocks.push(html);
     return `${PLACEHOLDER_PREFIX}${codeBlocks.length - 1}${PLACEHOLDER_SUFFIX}`;
+  });
+
+  // 1b. Extract Markdown tables into <pre> placeholders
+  withPlaceholders = withPlaceholders.replace(/(?:^|\n)(\|.+\|(?:\r?\n\|.+\|)*)/g, (_match, tableBlock: string) => {
+    const html = convertMarkdownTable(tableBlock);
+    codeBlocks.push(html);
+    return `\n${PLACEHOLDER_PREFIX}${codeBlocks.length - 1}${PLACEHOLDER_SUFFIX}`;
   });
 
   // 2. Process non-code-block text
@@ -97,4 +104,44 @@ function convertInlineFormatting(text: string): string {
       return s;
     })
     .join("");
+}
+
+/** Convert a Markdown table to an aligned monospace <pre> block. */
+function convertMarkdownTable(tableText: string): string {
+  const rows = tableText.split(/\r?\n/).filter((r) => r.includes("|"));
+
+  // Parse cells from each row
+  const parsed = rows.map((row) =>
+    row
+      .replace(/^\|/, "")
+      .replace(/\|$/, "")
+      .split("|")
+      .map((c) => c.trim()),
+  );
+
+  // Filter out separator rows (--- or :---: etc.)
+  const dataRows = parsed.filter((cells) => !cells.every((c) => /^[:\-\s]+$/.test(c)));
+  if (dataRows.length === 0) return `<pre>${escapeHtml(tableText)}</pre>`;
+
+  // Calculate max width per column
+  const colCount = Math.max(...dataRows.map((r) => r.length));
+  const widths: number[] = Array.from({ length: colCount }, () => 0);
+  for (const row of dataRows) {
+    for (let i = 0; i < colCount; i++) {
+      widths[i] = Math.max(widths[i] ?? 0, (row[i] ?? "").length);
+    }
+  }
+
+  // Build aligned rows
+  const lines = dataRows.map((row, rowIdx) => {
+    const padded = widths.map((w, i) => (row[i] ?? "").padEnd(w)).join("  ");
+    // Add a separator line after the header
+    if (rowIdx === 0 && dataRows.length > 1) {
+      const sep = widths.map((w) => "─".repeat(w)).join("──");
+      return `${padded}\n${sep}`;
+    }
+    return padded;
+  });
+
+  return `<pre>${escapeHtml(lines.join("\n"))}</pre>`;
 }

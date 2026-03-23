@@ -130,4 +130,29 @@ describe("markdownToTelegramHtml", () => {
   test("passes plain text through with only HTML escaping", () => {
     expect(markdownToTelegramHtml("hello world")).toBe("hello world");
   });
+
+  test("converts simple table to aligned pre block", () => {
+    const input = "| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |";
+    const result = markdownToTelegramHtml(input);
+    expect(result).toContain("<pre>");
+    expect(result).toContain("Alice");
+    expect(result).toContain("Bob");
+    expect(result).toContain("─");
+    expect(result).not.toContain("|");
+  });
+
+  test("table columns are padded to align", () => {
+    const input = "| A | BB |\n|---|----|\n| x | yy |";
+    const result = markdownToTelegramHtml(input);
+    // Header and data should be padded to same width (2-space column gap)
+    expect(result).toContain("A  BB");
+    expect(result).toContain("x  yy");
+  });
+
+  test("table with HTML special chars is escaped", () => {
+    const input = "| Col |\n|-----|\n| <b> |";
+    const result = markdownToTelegramHtml(input);
+    expect(result).toContain("&lt;b&gt;");
+    expect(result).not.toContain("<b>");
+  });
 });
