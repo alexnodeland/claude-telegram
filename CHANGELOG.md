@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-03-23
+
+### Added
+
+- **Job scheduler** — persistent scheduling system with two complementary paths:
+  - **User-facing**: `/schedule "prompt" every 30m`, `/jobs`, `/cancel`, `/pause` Telegram commands with natural syntax (`every Nm/Nh`, `at 9am weekdays`, `cron */15 * * * *`, `once at 2pm`)
+  - **Claude-facing**: `telegram_scheduler` MCP sidecar injected into every Claude subprocess with `schedule_job`, `list_jobs`, `cancel_job` tools — Claude can self-schedule work that outlives its session
+- **Schedule persistence** — jobs survive orchestrator restarts via `~/.claude/channels/telegram/schedules.json`
+- **Natural schedule expressions** — `parseScheduleExpression()` converts user-friendly syntax to 5-field cron; `croner` library handles next-run computation
+- **Inline job management** — `/jobs` shows jobs with inline pause/cancel buttons; callback queries handle `job:pause:<id>` and `job:cancel:<id>`
+- **Scheduler relay endpoints** — `POST /relay/schedule`, `GET /relay/schedules`, `DELETE /relay/schedule/:id` on the relay HTTP server for the MCP sidecar
+
+### Fixed
+
+- Resolved all pre-existing `noNonNullAssertion` lint warnings in `orchestrator.ts`, `relay-server.ts`, and `telegram.ts`
+
 ## [0.3.0] - 2026-03-22
 
 ### Added
@@ -52,6 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **HTML formatting** — all output uses Telegram HTML parse mode for reliable rendering
 - **Zero Telegram SDK** — all API calls use native `fetch`
 
+[0.4.0]: https://github.com/alexnodeland/claude-telegram/releases/tag/v0.4.0
 [0.2.1]: https://github.com/alexnodeland/claude-telegram/releases/tag/v0.2.1
 [0.2.0]: https://github.com/alexnodeland/claude-telegram/releases/tag/v0.2.0
 [0.1.0]: https://github.com/alexnodeland/claude-telegram/releases/tag/v0.1.0
