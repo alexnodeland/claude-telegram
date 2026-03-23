@@ -157,13 +157,14 @@ describe("markdownToTelegramHtml", () => {
   });
 
   test("converts blockquote", () => {
-    expect(markdownToTelegramHtml("> hello world")).toBe("<blockquote>hello world</blockquote>\n");
+    const result = markdownToTelegramHtml("> hello world");
+    expect(result).toContain("<blockquote>hello world</blockquote>");
   });
 
   test("converts multi-line blockquote", () => {
     const input = "> line one\n> line two";
     const result = markdownToTelegramHtml(input);
-    expect(result).toBe("<blockquote>line one\nline two</blockquote>\n");
+    expect(result).toContain("<blockquote>line one\nline two</blockquote>");
   });
 
   test("converts numbered lists", () => {
@@ -181,5 +182,15 @@ describe("markdownToTelegramHtml", () => {
     const result = markdownToTelegramHtml(input);
     expect(result).toContain("<blockquote>");
     expect(result).toContain("<b>important</b>");
+  });
+
+  test("blockquote with inline code inside", () => {
+    const input = "> Use `just ci` before releasing";
+    const result = markdownToTelegramHtml(input);
+    expect(result).toContain("<blockquote>");
+    expect(result).toContain("<code>just ci</code>");
+    expect(result).toContain("before releasing");
+    // Everything should be inside the blockquote
+    expect(result).toMatch(/<blockquote>.*<code>just ci<\/code>.*before releasing<\/blockquote>/);
   });
 });

@@ -53,6 +53,18 @@ export function markdownToTelegramHtml(md: string): string {
     return `\n${PLACEHOLDER_PREFIX}${codeBlocks.length - 1}${PLACEHOLDER_SUFFIX}`;
   });
 
+  // 1c. Extract blockquotes — inner content gets inline formatting
+  withPlaceholders = withPlaceholders.replace(/(?:^|\n)((?:> .+(?:\n|$))+)/g, (_match, block: string) => {
+    const inner = block
+      .split("\n")
+      .map((line) => line.replace(/^> /, ""))
+      .filter((line) => line !== "")
+      .join("\n");
+    const html = `<blockquote>${convertInlineFormatting(inner)}</blockquote>`;
+    codeBlocks.push(html);
+    return `\n${PLACEHOLDER_PREFIX}${codeBlocks.length - 1}${PLACEHOLDER_SUFFIX}`;
+  });
+
   // 2. Process non-code-block text
   const placeholderRe = new RegExp(`(${PLACEHOLDER_PREFIX}\\d+${PLACEHOLDER_SUFFIX})`, "g");
   const matchRe = new RegExp(`^${PLACEHOLDER_PREFIX}(\\d+)${PLACEHOLDER_SUFFIX}$`);
@@ -103,17 +115,6 @@ function convertInlineFormatting(text: string): string {
 
       // Bullet lists: leading "- " or "* " → "• "
       s = s.replace(/^[\t ]*[-*]\s+/gm, "• ");
-
-      // Blockquotes: leading "> " → <blockquote>
-      // Collect consecutive quoted lines into a single blockquote
-      s = s.replace(/(?:^&gt; (.+)$(?:\n|$))+/gm, (match) => {
-        const inner = match
-          .split("\n")
-          .map((line) => line.replace(/^&gt; /, ""))
-          .filter((line) => line !== "")
-          .join("\n");
-        return `<blockquote>${inner}</blockquote>\n`;
-      });
 
       return s;
     })
