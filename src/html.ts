@@ -98,8 +98,22 @@ function convertInlineFormatting(text: string): string {
       // Links: [text](url)
       s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
 
+      // Numbered lists: leading "1. " → keep number with period
+      s = s.replace(/^[\t ]*(\d+)\.\s+/gm, "$1. ");
+
       // Bullet lists: leading "- " or "* " → "• "
       s = s.replace(/^[\t ]*[-*]\s+/gm, "• ");
+
+      // Blockquotes: leading "> " → <blockquote>
+      // Collect consecutive quoted lines into a single blockquote
+      s = s.replace(/(?:^&gt; (.+)$(?:\n|$))+/gm, (match) => {
+        const inner = match
+          .split("\n")
+          .map((line) => line.replace(/^&gt; /, ""))
+          .filter((line) => line !== "")
+          .join("\n");
+        return `<blockquote>${inner}</blockquote>\n`;
+      });
 
       return s;
     })

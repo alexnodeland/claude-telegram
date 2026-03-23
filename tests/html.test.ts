@@ -155,4 +155,31 @@ describe("markdownToTelegramHtml", () => {
     expect(result).toContain("&lt;b&gt;");
     expect(result).not.toContain("<b>");
   });
+
+  test("converts blockquote", () => {
+    expect(markdownToTelegramHtml("> hello world")).toBe("<blockquote>hello world</blockquote>\n");
+  });
+
+  test("converts multi-line blockquote", () => {
+    const input = "> line one\n> line two";
+    const result = markdownToTelegramHtml(input);
+    expect(result).toBe("<blockquote>line one\nline two</blockquote>\n");
+  });
+
+  test("converts numbered lists", () => {
+    const input = "1. first\n2. second\n3. third";
+    expect(markdownToTelegramHtml(input)).toBe("1. first\n2. second\n3. third");
+  });
+
+  test("strips leading whitespace from numbered lists", () => {
+    const input = "  1. indented";
+    expect(markdownToTelegramHtml(input)).toBe("1. indented");
+  });
+
+  test("blockquote with formatting inside", () => {
+    const input = "> **important** note";
+    const result = markdownToTelegramHtml(input);
+    expect(result).toContain("<blockquote>");
+    expect(result).toContain("<b>important</b>");
+  });
 });
