@@ -38,3 +38,5 @@ export const TELEGRAM_API_BASE = "https://api.telegram.org";
 export const PAIRING_CODE_LENGTH = 6;
 export const TYPING_INTERVAL_MS = 4_500;
 export const RELAY_PROMPT_TIMEOUT_MS = 120_000; // 2 minutes
+export const SCHEDULER_CHECK_INTERVAL_MS = 30_000; // 30 seconds
+export const MAX_JOBS_PER_CHAT = 25;

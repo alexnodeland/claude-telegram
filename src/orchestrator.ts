@@ -32,9 +32,10 @@ import {
   saveAccessState,
 } from "./access.js";
 import { parseCommand } from "./commands.js";
-import { loadConfig, TYPING_INTERVAL_MS } from "./config.js";
+import { loadConfig, SCHEDULER_CHECK_INTERVAL_MS, TYPING_INTERVAL_MS } from "./config.js";
 import { escapeHtml, fmt } from "./html.js";
 import { type RelayServer, startRelayServer } from "./relay-server.js";
+import { parseScheduleExpression, ScheduleManager } from "./scheduler.js";
 import { SessionManager } from "./sessions.js";
 import { StreamingRenderer } from "./streaming.js";
 import { TelegramClient } from "./telegram.js";
@@ -43,6 +44,7 @@ import type {
   ClaudeMessage,
   DirectoryBookmark,
   PermissionMode,
+  ScheduledJob,
   SessionInfo,
   TelegramCallbackQuery,
   TelegramMessage,
@@ -101,6 +103,11 @@ async function saveBookmarks(): Promise<void> {
 }
 
 await loadBookmarks();
+
+// ─── Scheduler ───────────────────────────────────────────────────────────────
+
+const scheduler = new ScheduleManager(join(config.dataDir, "schedules.json"));
+await scheduler.load();
 
 // Also collect recent directories from session history for quick access
 function getRecentDirs(chatId: number): string[] {
@@ -328,7 +335,7 @@ const relay: RelayServer = await startRelayServer(async (request) => {
       [{ text: `✅ Always allow ${toolShort} in project`, callback_data: `permit:project:${toolName}` }],
     ],
   });
-});
+}, scheduler);
 
 // Human-readable tool descriptions for permission prompts
 const TOOL_DESCRIPTIONS: Record<string, string> = {
@@ -350,6 +357,7 @@ let globalModel = process.env.ORCHESTRATOR_MODEL;
 // Absolute path to the sidecar script
 const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "claude";
 const RELAY_SCRIPT = resolve(import.meta.dir, "permission-relay.ts");
+const SCHEDULER_SCRIPT = resolve(import.meta.dir, "scheduler-relay.ts");
 
 process.stderr.write(
   `✅  Orchestrator @${botInfo.username} ready — policy: ${access.policy}, ` +
@@ -371,6 +379,10 @@ await tg
     { command: "dirs", description: "Bookmarks and recent directories" },
     { command: "compact", description: "Fresh session in same directory" },
     { command: "help", description: "Show all commands" },
+    { command: "schedule", description: "Schedule a recurring job" },
+    { command: "jobs", description: "List scheduled jobs" },
+    { command: "cancel", description: "Cancel a scheduled job" },
+    { command: "pause", description: "Pause/resume a scheduled job" },
     { command: "approve", description: "Approve a pairing code" },
   ])
   .catch((e: Error) => process.stderr.write(`⚠️  setMyCommands failed: ${e.message}\n`));
@@ -474,6 +486,21 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       break;
     case "bookmark":
       await handleBookmark(chatId, cmd.path, cmd.name);
+      break;
+    case "schedule":
+      await handleSchedule(chatId, cmd.prompt, cmd.scheduleExpr, cmd.name, cmd.cwd);
+      break;
+    case "schedule_help":
+      await handleScheduleHelp(chatId);
+      break;
+    case "jobs":
+      await handleJobs(chatId);
+      break;
+    case "cancel":
+      await handleCancel(chatId, cmd.jobId);
+      break;
+    case "pause":
+      await handlePause(chatId, cmd.jobId);
       break;
     case "unknown_command":
       await tg.sendMessage(
@@ -673,6 +700,44 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
 
     await tg.answerCallbackQuery(query.id);
     return;
+  }
+
+  // Scheduled job actions: "job:cancel:<id>" or "job:pause:<id>"
+  const jobMatch = data.match(/^job:(cancel|pause):(.+)$/);
+  if (jobMatch?.[1] && jobMatch[2]) {
+    const [, action, jobId] = jobMatch;
+    if (action === "cancel") {
+      const deleted = scheduler.delete(jobId);
+      if (deleted) {
+        await scheduler.save();
+        await tg.answerCallbackQuery(query.id, "🗑 Job cancelled");
+        if (query.message) {
+          await tg
+            .editMessageText(chatId, query.message.message_id, `🗑 Job ${fmt.code(jobId)} cancelled`)
+            .catch(() => undefined);
+        }
+      } else {
+        await tg.answerCallbackQuery(query.id, "❌ Job not found");
+      }
+      return;
+    }
+    if (action === "pause") {
+      const toggled = scheduler.toggle(jobId);
+      if (toggled) {
+        await scheduler.save();
+        const job = scheduler.findById(jobId);
+        const state = job?.enabled ? "▶️ Resumed" : "⏸ Paused";
+        await tg.answerCallbackQuery(query.id, state);
+        if (query.message) {
+          await tg
+            .editMessageText(chatId, query.message.message_id, `${state} job ${fmt.code(jobId)}`)
+            .catch(() => undefined);
+        }
+      } else {
+        await tg.answerCallbackQuery(query.id, "❌ Job not found");
+      }
+      return;
+    }
   }
 
   // Mode switch: "mode:<mode>"
@@ -979,6 +1044,194 @@ async function handleStatus(chatId: number): Promise<void> {
   );
 }
 
+// ─── Scheduling handlers ──────────────────────────────────────────────────────
+
+async function handleSchedule(
+  chatId: number,
+  prompt: string,
+  scheduleExpr: string,
+  name?: string,
+  cwd?: string,
+): Promise<void> {
+  const session = sessions.getActive(chatId);
+  const jobCwd = cwd ?? session?.cwd ?? DEFAULT_CWD;
+
+  // Validate directory
+  try {
+    const s = await stat(jobCwd);
+    if (!s.isDirectory()) {
+      await tg.sendMessage(chatId, `❌ Not a directory: ${fmt.code(jobCwd)}`);
+      return;
+    }
+  } catch {
+    await tg.sendMessage(chatId, `❌ Directory not found: ${fmt.code(jobCwd)}`);
+    return;
+  }
+
+  const parsed = parseScheduleExpression(scheduleExpr);
+  if (!parsed) {
+    await tg.sendMessage(
+      chatId,
+      `❌ Invalid schedule: ${fmt.code(scheduleExpr)}\n\n` +
+        "Examples: every 30m, every 2h, at 9am weekdays, cron */15 * * * *",
+    );
+    return;
+  }
+
+  let job: ScheduledJob;
+  try {
+    job = scheduler.create(chatId, jobCwd, parsed.cronExpr, prompt, {
+      name,
+      recurring: parsed.recurring,
+      sessionId: session?.sessionId !== "pending" ? session?.sessionId : undefined,
+    });
+  } catch (err) {
+    await tg.sendMessage(chatId, `❌ ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+
+  await scheduler.save();
+
+  const nextRun = job.nextRunAt ? new Date(job.nextRunAt).toLocaleString() : "unknown";
+  const label = name ? fmt.bold(escapeHtml(name)) : fmt.code(prompt.slice(0, 50));
+
+  await tg.sendMessageWithKeyboard(
+    chatId,
+    [
+      `⏰ <b>Scheduled${parsed.recurring ? "" : " (one-shot)"}</b>`,
+      "",
+      `📝 ${label}`,
+      `🕐 ${fmt.code(parsed.cronExpr)}`,
+      `📂 ${fmt.code(jobCwd)}`,
+      `⏭ Next run: ${nextRun}`,
+      `🆔 ${fmt.code(job.id)}`,
+    ].join("\n"),
+    {
+      inline_keyboard: [[{ text: "🗑 Cancel", callback_data: `job:cancel:${job.id}` }]],
+    },
+  );
+}
+
+async function handleScheduleHelp(chatId: number): Promise<void> {
+  await tg.sendMessage(
+    chatId,
+    [
+      `<b>Usage:</b> ${fmt.code('/schedule "prompt" <when>')}`,
+      "",
+      "<b>Schedule expressions:</b>",
+      `${fmt.code("every 30m")} — every 30 minutes`,
+      `${fmt.code("every 2h")} — every 2 hours`,
+      `${fmt.code("every day")} — daily at 9am`,
+      `${fmt.code("at 9am weekdays")} — weekday mornings`,
+      `${fmt.code("at 2:30pm")} — daily at 2:30pm`,
+      `${fmt.code("cron */15 * * * *")} — raw cron`,
+      `${fmt.code("once at 3pm")} — one-shot`,
+      "",
+      "<b>Options:</b>",
+      `${fmt.code("--name alias")} — label the job`,
+      `${fmt.code("--cwd /path")} — working directory`,
+      "",
+      "<b>Examples:</b>",
+      `${fmt.code('/schedule "run tests" every 30m')}`,
+      `${fmt.code('/schedule "check deploy" at 9am weekdays --name deploy-check')}`,
+      `${fmt.code('/schedule "generate report" cron 0 18 * * 1-5')}`,
+    ].join("\n"),
+  );
+}
+
+async function handleJobs(chatId: number): Promise<void> {
+  const jobs = scheduler.list(chatId);
+  if (jobs.length === 0) {
+    await tg.sendMessage(chatId, "No scheduled jobs. Use /schedule to create one.");
+    return;
+  }
+
+  const lines: string[] = [`<b>Scheduled jobs</b> (${jobs.length})`, ""];
+  for (const job of jobs) {
+    const status = job.enabled ? "▶️" : "⏸";
+    const label = job.name ? escapeHtml(job.name) : escapeHtml(job.prompt.slice(0, 40));
+    const nextRun = job.nextRunAt ? new Date(job.nextRunAt).toLocaleString() : "—";
+    const runs = job.runCount > 0 ? ` (${job.runCount} runs)` : "";
+    lines.push(`${status} ${fmt.code(job.id)} ${fmt.bold(label)}`);
+    lines.push(`   ${fmt.code(job.cronExpr)} → ${nextRun}${runs}`);
+    lines.push("");
+  }
+
+  // Build inline buttons: 2 per row (pause + cancel per job)
+  const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (const job of jobs) {
+    const pauseLabel = job.enabled ? "⏸ Pause" : "▶️ Resume";
+    buttons.push([
+      { text: `${pauseLabel} ${job.id}`, callback_data: `job:pause:${job.id}` },
+      { text: `🗑 Cancel ${job.id}`, callback_data: `job:cancel:${job.id}` },
+    ]);
+  }
+
+  await tg.sendMessageWithKeyboard(chatId, lines.join("\n"), { inline_keyboard: buttons });
+}
+
+async function handleCancel(chatId: number, jobId: string): Promise<void> {
+  const job = scheduler.findById(jobId);
+  if (!job || job.chatId !== chatId) {
+    await tg.sendMessage(chatId, `❌ Job not found: ${fmt.code(jobId)}`);
+    return;
+  }
+  scheduler.delete(job.id);
+  await scheduler.save();
+  const label = job.name ?? job.prompt.slice(0, 40);
+  await tg.sendMessage(chatId, `🗑 Cancelled: ${escapeHtml(label)} (${fmt.code(job.id)})`);
+}
+
+async function handlePause(chatId: number, jobId: string): Promise<void> {
+  const job = scheduler.findById(jobId);
+  if (!job || job.chatId !== chatId) {
+    await tg.sendMessage(chatId, `❌ Job not found: ${fmt.code(jobId)}`);
+    return;
+  }
+  scheduler.toggle(job.id);
+  await scheduler.save();
+  const state = job.enabled ? "▶️ Resumed" : "⏸ Paused";
+  const label = job.name ?? job.prompt.slice(0, 40);
+  await tg.sendMessage(chatId, `${state}: ${escapeHtml(label)} (${fmt.code(job.id)})`);
+}
+
+// ─── Scheduled job execution ─────────────────────────────────────────────────
+
+async function executeScheduledJob(job: ScheduledJob): Promise<void> {
+  const label = job.name ?? job.prompt.slice(0, 50);
+  await tg.sendMessage(job.chatId, `⏰ <b>Scheduled:</b> ${escapeHtml(label)}`);
+
+  // Ensure an active session in the job's cwd
+  let session = sessions.getActive(job.chatId);
+
+  if (!session || session.cwd !== job.cwd) {
+    if (session) sessions.endActive(job.chatId);
+
+    // Try to resume the specific session if set
+    if (job.sessionId) {
+      const hist = sessions.findByIdPrefix(job.chatId, job.sessionId);
+      if (hist && hist.cwd === job.cwd) {
+        sessions.setActive(job.chatId, hist);
+        session = hist;
+      }
+    }
+
+    // Otherwise create a fresh session
+    if (!sessions.getActive(job.chatId)) {
+      session = sessions.create(job.chatId, job.cwd, "pending", job.name);
+      await sessions.save();
+    }
+  }
+
+  // Record execution BEFORE spawning (prevents crash → infinite retry)
+  scheduler.recordExecution(job.id);
+  if (!job.recurring) scheduler.delete(job.id);
+  await scheduler.save();
+
+  // Execute via the existing fire-and-forget pattern
+  handlePrompt(job.chatId, job.prompt);
+}
+
 async function handleHelp(chatId: number): Promise<void> {
   const session = sessions.getActive(chatId);
   const headerLines: string[] = [];
@@ -1017,6 +1270,12 @@ async function handleHelp(chatId: number): Promise<void> {
       "<b>Directories:</b>",
       `${fmt.code("/dirs")} — Bookmarks + recent dirs`,
       `${fmt.code("/bookmark /path --name alias")} — Save shortcut`,
+      "",
+      "<b>Scheduling:</b>",
+      `${fmt.code('/schedule "prompt" <when>')} — Schedule a job`,
+      `${fmt.code("/jobs")} — List scheduled jobs`,
+      `${fmt.code("/cancel <id>")} — Cancel a job`,
+      `${fmt.code("/pause <id>")} — Pause/resume a job`,
       "",
       "<b>Admin:</b>",
       `${fmt.code("/approve CODE")} — Approve pairing code`,
@@ -1270,6 +1529,15 @@ async function runQuery(
           RELAY_CHAT_ID: String(chatId),
         },
       },
+      telegram_scheduler: {
+        command: "bun",
+        args: ["run", SCHEDULER_SCRIPT],
+        env: {
+          RELAY_HTTP_PORT: String(relay.port),
+          RELAY_CHAT_ID: String(chatId),
+          SCHEDULER_CWD: session.cwd,
+        },
+      },
     },
   };
   await writeFile(mcpConfigPath, JSON.stringify(mcpConfig));
@@ -1489,8 +1757,8 @@ async function processNdjsonStream(
                 resultText = block.content;
               } else if (Array.isArray(block.content)) {
                 resultText = block.content
-                  .filter((b) => b.type === "text" && b.text)
-                  .map((b) => b.text!)
+                  .filter((b): b is { type: "text"; text: string } => b.type === "text" && !!b.text)
+                  .map((b) => b.text)
                   .join("\n");
               }
               if (resultText) {
@@ -1533,7 +1801,8 @@ async function sendQuestionPrompt(chatId: number, input: unknown): Promise<void>
   )?.questions;
   if (!questions?.length) return;
 
-  const q = questions[0]!;
+  const q = questions[0];
+  if (!q) return;
   let text = `❓ <b>Claude asks:</b>\n${escapeHtml(q.question)}`;
 
   if (q.options?.length) {
@@ -1580,6 +1849,23 @@ function formatAge(ms: number): string {
   return `${d}d ago`;
 }
 
+// ─── Scheduler tick ──────────────────────────────────────────────────────────
+
+const schedulerTimer = setInterval(async () => {
+  try {
+    const dueJobs = scheduler.getDueJobs(Date.now());
+    for (const job of dueJobs) {
+      if (sessions.isProcessing(job.chatId)) {
+        process.stderr.write(`⏰  Skipping scheduled job ${job.id} — chat ${job.chatId} is busy\n`);
+        continue;
+      }
+      await executeScheduledJob(job);
+    }
+  } catch (err) {
+    process.stderr.write(`⚠️  Scheduler tick error: ${err instanceof Error ? err.message : err}\n`);
+  }
+}, SCHEDULER_CHECK_INTERVAL_MS);
+
 // ─── Poll loop ────────────────────────────────────────────────────────────────
 
 async function pollLoop(): Promise<void> {
@@ -1613,6 +1899,7 @@ async function pollLoop(): Promise<void> {
 
 function shutdown() {
   process.stderr.write("\n🛑  Shutting down…\n");
+  clearInterval(schedulerTimer);
   relay.shutdown();
   for (const [, proc] of activeProcs) {
     try {
@@ -1621,7 +1908,7 @@ function shutdown() {
       /* already dead */
     }
   }
-  sessions.save().finally(() => process.exit(0));
+  Promise.all([sessions.save(), scheduler.save()]).finally(() => process.exit(0));
 }
 
 process.on("SIGINT", shutdown);

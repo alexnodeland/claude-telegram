@@ -121,6 +121,9 @@ Permission prompts are forwarded to Telegram with granular options — approve o
 ### Slash command pass-through
 Run Claude Code commands directly: `/cc commit`, `/cc review-pr 123`, `/cc diff`. Or tap through an interactive menu.
 
+### Job scheduling
+Schedule prompts to run on a recurring or one-shot basis. Use natural syntax like `every 30m`, `at 9am weekdays`, or raw cron expressions. Claude can also self-schedule work via MCP tools — e.g. "check the deploy every 5 minutes" creates a job that outlives the session.
+
 ## Commands
 
 | Command | What it does |
@@ -134,6 +137,10 @@ Run Claude Code commands directly: `/cc commit`, `/cc review-pr 123`, `/cc diff`
 | `/stop` | Stop current task or end session |
 | `/dirs` | Browse bookmarked and recent directories |
 | `/bookmark` | Save a directory shortcut: `/bookmark /path --name alias` |
+| `/schedule` | Schedule a job: `/schedule "run tests" every 30m` |
+| `/jobs` | List scheduled jobs with pause/cancel buttons |
+| `/cancel` | Cancel a scheduled job by ID |
+| `/pause` | Pause or resume a scheduled job |
 | `/cost` | Show session cost |
 | `/status` | Full session info |
 | `/help` | Show all commands |

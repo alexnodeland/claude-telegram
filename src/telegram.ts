@@ -77,8 +77,8 @@ export class TelegramClient {
 
     if (!res.ok) throw new Error(`sendDocument HTTP ${res.status}`);
     const json = (await res.json()) as TelegramSendMessageResponse;
-    if (!json.ok) throw new Error(`sendDocument failed: ${json.description}`);
-    return json.result!;
+    if (!json.ok || !json.result) throw new Error(`sendDocument failed: ${json.description}`);
+    return json.result;
   }
 
   async sendPhoto(chatId: number, imageData: Uint8Array, filename: string, caption?: string): Promise<TelegramMessage> {
@@ -94,8 +94,8 @@ export class TelegramClient {
 
     if (!res.ok) throw new Error(`sendPhoto HTTP ${res.status}`);
     const json = (await res.json()) as TelegramSendMessageResponse;
-    if (!json.ok) throw new Error(`sendPhoto failed: ${json.description}`);
-    return json.result!;
+    if (!json.ok || !json.result) throw new Error(`sendPhoto failed: ${json.description}`);
+    return json.result;
   }
 
   async editMessageText(chatId: number, messageId: number, text: string): Promise<void> {

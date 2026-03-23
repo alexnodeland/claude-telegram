@@ -12,11 +12,13 @@ Shared: `telegram.ts` (API client), `html.ts` (HTML formatting), `access.ts` (pa
 
 Sidecar: `permission-relay.ts` + `relay-server.ts` handle permission prompts in orchestrator mode via local HTTP relay.
 
+Sidecar: `scheduler-relay.ts` exposes scheduling MCP tools to Claude sessions, relaying to `relay-server.ts`. Scheduler state managed by `scheduler.ts` (`ScheduleManager`).
+
 ## Runtime
 
 - **Bun >= 1.1** — not Node. Uses Bun APIs (`Bun.spawn`, `Bun.serve`).
 - **Zero Telegram SDK** — all Telegram API calls use native `fetch` in `src/telegram.ts`.
-- **Dependencies**: `@modelcontextprotocol/sdk`, `zod` only.
+- **Dependencies**: `@modelcontextprotocol/sdk`, `zod`, `croner` (cron expression evaluation).
 
 ## Commands
 
@@ -54,13 +56,28 @@ When spawning a session via `/new`, the orchestrator reads the target directory'
 ### `/cc` slash command pass-through
 `/cc <command>` forwards Claude Code slash commands (commit, review-pr, plan, etc.) to the active session. `/cc` alone shows an interactive menu of common commands.
 
+### Job scheduling
+Two complementary scheduling paths:
+
+**User-facing** — Telegram commands create persistent scheduled jobs:
+- `/schedule "prompt" every 30m` — natural syntax (`every Nm/Nh`, `at 9am weekdays`, `cron */15 * * * *`, `once at 2pm`)
+- `/jobs` — list with inline pause/cancel buttons
+- `/cancel <id>`, `/pause <id>` — manage jobs
+
+**Claude-facing** — Every Claude subprocess gets a `telegram_scheduler` MCP sidecar (injected via `--mcp-config` alongside `telegram_relay`). Tools: `schedule_job`, `list_jobs`, `cancel_job`. Claude can self-schedule work that outlives its session (e.g. "check the deploy every 30 minutes").
+
+Both paths write to the same `ScheduleManager` (persisted at `~/.claude/channels/telegram/schedules.json`). The orchestrator runs a 30-second `setInterval` tick that calls `getDueJobs()` and executes them via the existing `handlePrompt` → `runQuery` pipeline. Jobs that fire while a chat is busy are skipped (not queued). Execution is recorded *before* spawning to prevent crash → infinite retry. One-shot jobs auto-delete after firing.
+
+`parseScheduleExpression()` in `src/scheduler.ts` converts natural language to 5-field cron. The `croner` library handles next-run computation. Max 25 jobs per chat.
+
 ## Testing
 
 Tests in `tests/` using Bun's built-in test runner.
 
-- `tests/commands.test.ts` — command parser (pure function, covers /cc, /mode, /dirs, /bookmark, unknown commands)
+- `tests/commands.test.ts` — command parser (covers /cc, /mode, /dirs, /bookmark, /schedule, /jobs, /cancel, /pause, unknown commands)
 - `tests/access.test.ts` — pairing codes, allowlist, persistence
 - `tests/sessions.test.ts` — SessionManager CRUD, cost tracking
+- `tests/scheduler.test.ts` — ScheduleManager CRUD, cron parsing, getDueJobs, `parseScheduleExpression`, persistence
 - `tests/streaming.test.ts` — message chunking, HTML tool formatting, step counter, error indication
 - `tests/html.test.ts` — escapeHtml, fmt helpers
 

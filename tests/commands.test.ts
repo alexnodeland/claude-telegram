@@ -171,6 +171,90 @@ describe("parseCommand", () => {
     });
   });
 
+  // ─── /schedule ──────────────────────────────────────────────────────────────
+  test("/schedule with no args shows help", () => {
+    expect(parseCommand("/schedule")).toEqual({ type: "schedule_help" });
+  });
+
+  test('/schedule with every syntax', () => {
+    expect(parseCommand('/schedule "run tests" every 30m')).toEqual({
+      type: "schedule",
+      prompt: "run tests",
+      scheduleExpr: "every 30m",
+      name: undefined,
+      cwd: undefined,
+    });
+  });
+
+  test('/schedule with cron syntax', () => {
+    expect(parseCommand('/schedule "deploy" cron 0 9 * * 1-5')).toEqual({
+      type: "schedule",
+      prompt: "deploy",
+      scheduleExpr: "cron 0 9 * * 1-5",
+      name: undefined,
+      cwd: undefined,
+    });
+  });
+
+  test('/schedule with --name flag', () => {
+    expect(parseCommand('/schedule "run tests" every 5m --name tester')).toEqual({
+      type: "schedule",
+      prompt: "run tests",
+      scheduleExpr: "every 5m",
+      name: "tester",
+      cwd: undefined,
+    });
+  });
+
+  test('/schedule with --cwd flag', () => {
+    expect(parseCommand('/schedule "deploy" every day --cwd /home/user/proj')).toEqual({
+      type: "schedule",
+      prompt: "deploy",
+      scheduleExpr: "every day",
+      name: undefined,
+      cwd: "/home/user/proj",
+    });
+  });
+
+  test('/schedule with single quotes', () => {
+    expect(parseCommand("/schedule 'check status' at 9am")).toEqual({
+      type: "schedule",
+      prompt: "check status",
+      scheduleExpr: "at 9am",
+      name: undefined,
+      cwd: undefined,
+    });
+  });
+
+  test('/schedule with both flags', () => {
+    expect(parseCommand('/schedule "tests" every 10m --name ci --cwd /proj')).toEqual({
+      type: "schedule",
+      prompt: "tests",
+      scheduleExpr: "every 10m",
+      name: "ci",
+      cwd: "/proj",
+    });
+  });
+
+  test("/schedule with no prompt shows help", () => {
+    expect(parseCommand("/schedule something")).toEqual({ type: "schedule_help" });
+  });
+
+  // ─── /jobs ─────────────────────────────────────────────────────────────────
+  test("/jobs", () => {
+    expect(parseCommand("/jobs")).toEqual({ type: "jobs" });
+  });
+
+  // ─── /cancel ───────────────────────────────────────────────────────────────
+  test("/cancel with job id", () => {
+    expect(parseCommand("/cancel abc12345")).toEqual({ type: "cancel", jobId: "abc12345" });
+  });
+
+  // ─── /pause ────────────────────────────────────────────────────────────────
+  test("/pause with job id", () => {
+    expect(parseCommand("/pause abc12345")).toEqual({ type: "pause", jobId: "abc12345" });
+  });
+
   // ─── Unknown commands ──────────────────────────────────────────────────────
   test("unknown single-word command", () => {
     expect(parseCommand("/foo")).toEqual({ type: "unknown_command", text: "/foo" });

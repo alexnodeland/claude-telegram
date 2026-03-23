@@ -147,6 +147,25 @@ export interface DirectoryBookmark {
   name: string;
 }
 
+// ─── Scheduling ──────────────────────────────────────────────────────────────
+
+export interface ScheduledJob {
+  id: string;
+  chatId: number;
+  cwd: string;
+  cronExpr: string;
+  prompt: string;
+  name?: string;
+  recurring: boolean;
+  sessionId?: string;
+  createdAt: number;
+  lastRunAt?: number;
+  nextRunAt?: number;
+  runCount: number;
+  expiresAt?: number;
+  enabled: boolean;
+}
+
 // ─── Permission Relay Protocol ───────────────────────────────────────────────
 
 export interface RelayPromptRequest {

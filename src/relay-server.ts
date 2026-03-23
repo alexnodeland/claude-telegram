@@ -1,4 +1,5 @@
 import { RELAY_PROMPT_TIMEOUT_MS } from "./config.js";
+import type { ScheduleManager } from "./scheduler.js";
 import type { RelayPromptRequest, RelayPromptResponse } from "./types.js";
 
 interface PendingPrompt {
@@ -28,6 +29,7 @@ export interface RelayServer {
  */
 export async function startRelayServer(
   onPrompt?: (request: RelayPromptRequest) => Promise<void>,
+  scheduler?: ScheduleManager,
 ): Promise<RelayServer> {
   const pending = new Map<number, PendingPrompt>();
 
@@ -80,11 +82,50 @@ export async function startRelayServer(
         return Response.json(response);
       }
 
+      // ─── Schedule endpoints (for scheduler-relay sidecar) ──────────────
+
+      if (req.method === "POST" && url.pathname === "/relay/schedule") {
+        if (!scheduler) return Response.json({ error: "scheduler not configured" }, { status: 501 });
+        try {
+          const body = (await req.json()) as {
+            chatId: number;
+            cwd: string;
+            cronExpr: string;
+            prompt: string;
+            name?: string;
+            recurring?: boolean;
+          };
+          const job = scheduler.create(body.chatId, body.cwd, body.cronExpr, body.prompt, {
+            name: body.name,
+            recurring: body.recurring ?? true,
+          });
+          await scheduler.save();
+          return Response.json({ ok: true, job });
+        } catch (err) {
+          return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 });
+        }
+      }
+
+      if (req.method === "GET" && url.pathname === "/relay/schedules") {
+        if (!scheduler) return Response.json({ error: "scheduler not configured" }, { status: 501 });
+        const chatId = Number(url.searchParams.get("chatId"));
+        const jobs = chatId ? scheduler.list(chatId) : scheduler.list();
+        return Response.json({ ok: true, jobs });
+      }
+
+      if (req.method === "DELETE" && url.pathname.startsWith("/relay/schedule/")) {
+        if (!scheduler) return Response.json({ error: "scheduler not configured" }, { status: 501 });
+        const id = url.pathname.split("/").pop() ?? "";
+        const deleted = scheduler.delete(id);
+        if (deleted) await scheduler.save();
+        return Response.json({ ok: true, deleted });
+      }
+
       return new Response("Not found", { status: 404 });
     },
   });
 
-  const port = server.port!;
+  const port = server.port ?? 0;
   process.stderr.write(`🔌  Relay server on 127.0.0.1:${port}\n`);
 
   return {

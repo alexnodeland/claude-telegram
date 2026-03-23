@@ -24,6 +24,10 @@ const KNOWN_COMMANDS = new Set([
   "pair",
   "dirs",
   "bookmark",
+  "schedule",
+  "jobs",
+  "cancel",
+  "pause",
 ]);
 
 export type Command =
@@ -44,6 +48,12 @@ export type Command =
   // Directory bookmarks
   | { type: "dirs" }
   | { type: "bookmark"; path?: string; name?: string }
+  // Scheduling
+  | { type: "schedule"; prompt: string; scheduleExpr: string; name?: string; cwd?: string }
+  | { type: "schedule_help" }
+  | { type: "jobs" }
+  | { type: "cancel"; jobId: string }
+  | { type: "pause"; jobId: string }
   // Admin
   | { type: "help" }
   | { type: "approve"; code: string }
@@ -147,6 +157,50 @@ export function parseCommand(text: string): Command {
     const name = nameMatch?.[1];
     const path = args.replace(/--name\s+\S+/, "").trim() || undefined;
     return { type: "bookmark", path, name };
+  }
+
+  // /schedule "prompt" <schedule expression> [--name alias] [--cwd path]
+  if (trimmed === "/schedule" || trimmed.startsWith("/schedule ")) {
+    const args = trimmed.slice(9).trim();
+    if (!args) return { type: "schedule_help" };
+
+    // Extract quoted prompt (single or double quotes)
+    const promptMatch = args.match(/^(["'])(.+?)\1\s+(.+)$/);
+    if (!promptMatch?.[2] || !promptMatch[3]) return { type: "schedule_help" };
+
+    const prompt = promptMatch[2];
+    let rest = promptMatch[3];
+
+    // Extract optional flags
+    const nameMatch = rest.match(/--name\s+(\S+)/);
+    const name = nameMatch?.[1];
+    if (nameMatch) rest = rest.replace(/--name\s+\S+/, "").trim();
+
+    const cwdMatch = rest.match(/--cwd\s+(\S+)/);
+    const cwd = cwdMatch?.[1];
+    if (cwdMatch) rest = rest.replace(/--cwd\s+\S+/, "").trim();
+
+    const scheduleExpr = rest.trim();
+    if (!scheduleExpr) return { type: "schedule_help" };
+
+    return { type: "schedule", prompt, scheduleExpr, name, cwd };
+  }
+
+  // /jobs — list scheduled jobs
+  if (trimmed === "/jobs") {
+    return { type: "jobs" };
+  }
+
+  // /cancel <jobId>
+  if (trimmed.startsWith("/cancel ")) {
+    const jobId = trimmed.slice(8).trim();
+    if (jobId) return { type: "cancel", jobId };
+  }
+
+  // /pause <jobId>
+  if (trimmed.startsWith("/pause ")) {
+    const jobId = trimmed.slice(7).trim();
+    if (jobId) return { type: "pause", jobId };
   }
 
   // Detect unknown /commands (single-word slash that isn't a known command)
