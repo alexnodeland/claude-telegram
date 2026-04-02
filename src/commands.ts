@@ -7,7 +7,6 @@ import type { PermissionMode } from "./types.js";
 /** Known bot commands — used to distinguish unknown /commands from prompts. */
 const KNOWN_COMMANDS = new Set([
   "new",
-  "resume",
   "sessions",
   "list",
   "stop",
@@ -23,17 +22,13 @@ const KNOWN_COMMANDS = new Set([
   "start",
   "pair",
   "dirs",
-  "bookmark",
   "schedule",
   "jobs",
-  "cancel",
-  "pause",
 ]);
 
 export type Command =
   // Session management
   | { type: "new"; cwd?: string; name?: string }
-  | { type: "resume"; target?: string }
   | { type: "sessions" }
   | { type: "stop" }
   // Claude control
@@ -45,15 +40,12 @@ export type Command =
   // Claude Code slash command pass-through
   | { type: "cc"; slashCommand: string; args: string }
   | { type: "cc_menu" } // /cc alone — show command picker
-  // Directory bookmarks
+  // Directories
   | { type: "dirs" }
-  | { type: "bookmark"; path?: string; name?: string }
   // Scheduling
   | { type: "schedule"; prompt: string; scheduleExpr: string; name?: string; cwd?: string }
   | { type: "schedule_help" }
   | { type: "jobs" }
-  | { type: "cancel"; jobId: string }
-  | { type: "pause"; jobId: string }
   // Admin
   | { type: "help" }
   | { type: "approve"; code: string }
@@ -74,11 +66,6 @@ export function parseCommand(text: string): Command {
     const name = nameMatch?.[1];
     const cwd = args.replace(/--name\s+\S+/, "").trim() || undefined;
     return { type: "new", cwd, name };
-  }
-
-  if (trimmed === "/resume" || trimmed.startsWith("/resume ")) {
-    const target = trimmed.slice(7).trim() || undefined;
-    return { type: "resume", target };
   }
 
   if (trimmed === "/sessions" || trimmed === "/list") {
@@ -150,16 +137,6 @@ export function parseCommand(text: string): Command {
     return { type: "dirs" };
   }
 
-  // /bookmark [path] [--name alias]
-  if (trimmed === "/bookmark" || trimmed.startsWith("/bookmark ")) {
-    const args = trimmed.slice(9).trim();
-    if (!args) return { type: "bookmark" };
-    const nameMatch = args.match(/--name\s+(\S+)/);
-    const name = nameMatch?.[1];
-    const path = args.replace(/--name\s+\S+/, "").trim() || undefined;
-    return { type: "bookmark", path, name };
-  }
-
   // /schedule "prompt" <schedule expression> [--name alias] [--cwd path]
   if (trimmed === "/schedule" || trimmed.startsWith("/schedule ")) {
     const args = trimmed.slice(9).trim();
@@ -190,18 +167,6 @@ export function parseCommand(text: string): Command {
   // /jobs — list scheduled jobs
   if (trimmed === "/jobs") {
     return { type: "jobs" };
-  }
-
-  // /cancel <jobId>
-  if (trimmed.startsWith("/cancel ")) {
-    const jobId = trimmed.slice(8).trim();
-    if (jobId) return { type: "cancel", jobId };
-  }
-
-  // /pause <jobId>
-  if (trimmed.startsWith("/pause ")) {
-    const jobId = trimmed.slice(7).trim();
-    if (jobId) return { type: "pause", jobId };
   }
 
   // Detect unknown /commands (single-word slash that isn't a known command)

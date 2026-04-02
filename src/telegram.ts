@@ -221,4 +221,12 @@ export class TelegramClient {
   async reopenForumTopic(chatId: number, threadId: number): Promise<void> {
     await this.call("reopenForumTopic", { chat_id: chatId, message_thread_id: threadId });
   }
+
+  async closeGeneralForumTopic(chatId: number): Promise<void> {
+    await this.call("closeGeneralForumTopic", { chat_id: chatId });
+  }
+
+  async reopenGeneralForumTopic(chatId: number): Promise<void> {
+    await this.call("reopenGeneralForumTopic", { chat_id: chatId });
+  }
 }

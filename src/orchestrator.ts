@@ -49,7 +49,6 @@ import { TopicManager } from "./topics.js";
 import type {
   AccessState,
   ClaudeMessage,
-  DirectoryBookmark,
   PermissionMode,
   ScheduledJob,
   SessionInfo,
@@ -215,11 +214,13 @@ const COCKPIT_KEYBOARD = {
     ],
     [
       { text: "⏰ Jobs", callback_data: "quick:jobs" },
-      { text: "📂 Dirs", callback_data: "quick:dirs" },
+      { text: "❓ Help", callback_data: "quick:help" },
     ],
-    [{ text: "❓ Help", callback_data: "quick:help" }],
   ],
 };
+
+/** Track whether we've already closed General for a chat this runtime. */
+const generalClosed = new Set<number>();
 
 /** Ensure the General topic has a pinned cockpit. Creates or updates. */
 async function ensureGeneralPin(chatId: number): Promise<void> {
@@ -229,17 +230,34 @@ async function ensureGeneralPin(chatId: number): Promise<void> {
   const text = buildCockpitText(chatId);
   const existing = generalPinIds.get(chatId);
   if (existing) {
-    await tg.editMessageText(chatId, existing, text, COCKPIT_KEYBOARD).catch(() => {
-      // Message was deleted — recreate
+    // Edit existing — ignore "message not modified" errors
+    await tg.editMessageText(chatId, existing, text, COCKPIT_KEYBOARD).catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("not modified")) return; // text unchanged, fine
+      // Message was actually deleted — recreate
       generalPinIds.delete(chatId);
     });
-    if (generalPinIds.has(chatId)) return;
+    if (generalPinIds.has(chatId)) {
+      // Ensure General is closed (once per runtime)
+      if (!generalClosed.has(chatId)) {
+        await tg.closeGeneralForumTopic(chatId).catch(() => undefined);
+        generalClosed.add(chatId);
+      }
+      return;
+    }
+  }
+
+  // Delete old pin if it exists (force fresh keyboard)
+  if (existing) {
+    await tg.deleteMessage(chatId, existing);
   }
 
   try {
     const msg = await tg.sendMessageWithKeyboard(chatId, text, COCKPIT_KEYBOARD);
     await tg.pinChatMessage(chatId, msg.message_id).catch(() => undefined);
     await saveGeneralPin(chatId, msg.message_id);
+    await tg.closeGeneralForumTopic(chatId).catch(() => undefined);
+    generalClosed.add(chatId);
   } catch (err) {
     process.stderr.write(`⚠️  Failed to pin cockpit: ${err}\n`);
   }
@@ -251,26 +269,6 @@ function refreshCockpit(chatId: number): void {
 }
 
 await loadGeneralPins();
-
-// ─── Directory bookmarks ──────────────────────────────────────────────────────
-
-const bookmarksPath = join(config.dataDir, "bookmarks.json");
-let bookmarks: DirectoryBookmark[] = [];
-
-async function loadBookmarks(): Promise<void> {
-  try {
-    const data = await readFile(bookmarksPath, "utf8");
-    bookmarks = JSON.parse(data) as DirectoryBookmark[];
-  } catch {
-    bookmarks = [];
-  }
-}
-
-async function saveBookmarks(): Promise<void> {
-  await writeFile(bookmarksPath, JSON.stringify(bookmarks, null, 2));
-}
-
-await loadBookmarks();
 
 // ─── Scheduler ───────────────────────────────────────────────────────────────
 
@@ -383,16 +381,10 @@ async function showNewPicker(key: TopicKey): Promise<void> {
   const recent = getRecentDirs(key.chatId);
   const shortcuts: Array<{ text: string; buttonText: string; path: string }> = [];
 
-  // Add bookmarks
-  for (const b of bookmarks) {
-    shortcuts.push({ text: `📌 ${b.name}`, buttonText: `📌 ${b.name}`, path: b.path });
-  }
-
-  // Add recent dirs (deduplicated against bookmarks and DEFAULT_CWD)
+  // Add recent dirs (deduplicated against DEFAULT_CWD)
   for (const d of recent) {
     if (d === DEFAULT_CWD) continue;
     if (shortcuts.some((s) => s.path === d)) continue;
-    // Show last 2 path segments for clarity (e.g. "projects/my-app")
     const parts = d.split("/").filter(Boolean);
     const short = parts.length >= 2 ? parts.slice(-2).join("/") : (parts[parts.length - 1] ?? d);
     shortcuts.push({ text: `📂 ${short}`, buttonText: `📂 ${short}`, path: d });
@@ -404,11 +396,11 @@ async function showNewPicker(key: TopicKey): Promise<void> {
 
   const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
 
-  // Browse from home — show the actual home path
+  // Browse from home
   const homeName = DEFAULT_CWD.split("/").filter(Boolean).pop() ?? "home";
   buttons.push([{ text: `🏠 Browse ~/${homeName}`, callback_data: "nav:browse_home" }]);
 
-  // Shortcut buttons (1 per row for readability — paths can be long)
+  // Recent dir shortcuts (1 per row)
   for (let i = 0; i < Math.min(shortcuts.length, 6); i++) {
     const s = shortcuts[i];
     if (s) buttons.push([{ text: s.buttonText, callback_data: `nav:pick_${i}` }]);
@@ -417,7 +409,7 @@ async function showNewPicker(key: TopicKey): Promise<void> {
   const lines =
     shortcuts.length > 0
       ? shortcuts.map((s) => `${s.text} → ${fmt.code(s.path)}`).join("\n")
-      : "<i>No bookmarks or recent sessions</i>";
+      : "<i>No recent sessions</i>";
 
   await sendGeneralKeyboard(
     key.chatId,
@@ -544,22 +536,17 @@ process.stderr.write(
 await tg
   .setMyCommands([
     { command: "new", description: "Start a new Claude session" },
-    { command: "resume", description: "Resume a previous session" },
-    { command: "sessions", description: "List all sessions" },
-    { command: "stop", description: "Stop current task / end session" },
-    { command: "model", description: "View or change the model" },
-    { command: "cost", description: "Show session cost" },
-    { command: "status", description: "Show current session status" },
-    { command: "cc", description: "Run a Claude Code slash command" },
-    { command: "mode", description: "Switch permission mode (normal/plan/auto)" },
-    { command: "dirs", description: "Bookmarks and recent directories" },
-    { command: "compact", description: "Fresh session in same directory" },
-    { command: "help", description: "Show all commands" },
-    { command: "schedule", description: "Schedule a recurring job" },
+    { command: "sessions", description: "List + resume sessions" },
+    { command: "stop", description: "End session" },
+    { command: "compact", description: "Fresh session, same directory" },
+    { command: "cc", description: "Claude Code slash command" },
+    { command: "model", description: "Switch model" },
+    { command: "mode", description: "Permission mode" },
+    { command: "cost", description: "Session cost" },
+    { command: "status", description: "Session info" },
+    { command: "schedule", description: "Schedule a job" },
     { command: "jobs", description: "List scheduled jobs" },
-    { command: "cancel", description: "Cancel a scheduled job" },
-    { command: "pause", description: "Pause/resume a scheduled job" },
-    { command: "approve", description: "Approve a pairing code" },
+    { command: "help", description: "Show all commands" },
   ])
   .catch((e: Error) => process.stderr.write(`⚠️  setMyCommands failed: ${e.message}\n`));
 
@@ -792,17 +779,13 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
 
     const MANAGEMENT_COMMANDS: ReadonlySet<string> = new Set([
       "new",
-      "resume",
       "sessions",
       "help",
       "approve",
       "schedule",
       "schedule_help",
       "jobs",
-      "cancel",
-      "pause",
       "dirs",
-      "bookmark",
     ]);
 
     const SESSION_LOCAL_COMMANDS: ReadonlySet<string> = new Set([
@@ -815,6 +798,9 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       "mode",
       "model",
       "prompt",
+      "schedule",
+      "schedule_help",
+      "jobs",
     ]);
 
     if (isGeneralTopic) {
@@ -838,9 +824,6 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
   switch (cmd.type) {
     case "new":
       await handleNew(key, cmd.cwd, cmd.name);
-      break;
-    case "resume":
-      await handleResume(key, cmd.target);
       break;
     case "sessions":
       await handleListSessions(key);
@@ -876,10 +859,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       await handleMode(key, cmd.mode);
       break;
     case "dirs":
-      await handleDirs(key);
-      break;
-    case "bookmark":
-      await handleBookmark(chatId, cmd.path, cmd.name);
+      await showNewPicker(key);
       break;
     case "schedule":
       await handleSchedule(key, cmd.prompt, cmd.scheduleExpr, cmd.name, cmd.cwd);
@@ -889,12 +869,6 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       break;
     case "jobs":
       await handleJobs(key);
-      break;
-    case "cancel":
-      await handleCancel(key, cmd.jobId);
-      break;
-    case "pause":
-      await handlePause(key, cmd.jobId);
       break;
     case "unknown_command":
       await sendGeneralMessage(
@@ -941,6 +915,9 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
   // Extract threadId from the callback's original message for correct topic routing
   const threadId = query.message?.message_thread_id;
   const key: TopicKey = { chatId, threadId };
+
+  // Ensure cockpit exists for forum chats
+  ensureGeneralPin(chatId).catch(() => undefined);
 
   // Permission prompt callbacks
   if (data.startsWith("permit:")) {
@@ -1016,8 +993,13 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
   // Session resume: "resume:<id-prefix>"
   const resumeMatch = data.match(/^resume:(.+)$/);
   if (resumeMatch?.[1]) {
-    await tg.answerCallbackQuery(query.id, "🔄 Resuming…");
-    await handleResume(key, resumeMatch[1]);
+    const match = sessions.findByIdPrefix(key.chatId, resumeMatch[1]);
+    if (match) {
+      await tg.answerCallbackQuery(query.id, "🔄 Resuming…");
+      await resumeSession(key, match);
+    } else {
+      await tg.answerCallbackQuery(query.id, "Session not found");
+    }
     return;
   }
 
@@ -1317,86 +1299,6 @@ async function handleNew(key: TopicKey, cwd?: string, name?: string): Promise<vo
     undefined,
     key.threadId,
   );
-}
-
-async function handleResume(key: TopicKey, target?: string): Promise<void> {
-  if (sessions.isProcessing(key)) {
-    await tg.sendMessage(
-      key.chatId,
-      "⏳ A task is still running. Wait for it to finish or /stop first.",
-      undefined,
-      key.threadId,
-    );
-    return;
-  }
-
-  const history = sessions.listForChat(key.chatId);
-
-  if (!target) {
-    if (history.length === 0) {
-      await tg.sendMessage(key.chatId, "No previous sessions. Use /new to start one.", undefined, key.threadId);
-      return;
-    }
-
-    // Show interactive picker with recent sessions
-    if (history.length > 1) {
-      const lines = history.slice(0, 5).map((s) => {
-        const label = s.name ?? s.title ?? s.sessionId.slice(0, 8);
-        const dir = s.cwd.split("/").pop() ?? s.cwd;
-        const age = formatAge(Date.now() - s.lastActiveAt);
-        return `• <b>${escapeHtml(label)}</b>\n  📂 ${fmt.code(dir)} · ${age}`;
-      });
-
-      const buttonRows: Array<Array<{ text: string; callback_data: string }>> = [];
-      const items = history.slice(0, 5);
-      for (let i = 0; i < items.length; i += 2) {
-        const row: Array<{ text: string; callback_data: string }> = [];
-        const s1 = items[i];
-        if (s1) {
-          const lbl = s1.name ?? s1.title ?? `${s1.sessionId.slice(0, 8)}…`;
-          row.push({ text: lbl.slice(0, 20), callback_data: `resume:${s1.sessionId.slice(0, 8)}` });
-        }
-        const s2 = items[i + 1];
-        if (s2) {
-          const lbl = s2.name ?? s2.title ?? `${s2.sessionId.slice(0, 8)}…`;
-          row.push({ text: lbl.slice(0, 20), callback_data: `resume:${s2.sessionId.slice(0, 8)}` });
-        }
-        if (row.length > 0) buttonRows.push(row);
-      }
-
-      await tg.sendMessageWithKeyboard(
-        key.chatId,
-        `🔄 <b>Resume which session?</b>\n\n${lines.join("\n")}`,
-        {
-          inline_keyboard: buttonRows,
-        },
-        key.threadId,
-      );
-      return;
-    }
-
-    // Only one session — resume it directly
-    const last = history[0] as SessionInfo;
-    await resumeSession(key, last);
-    return;
-  }
-
-  const match =
-    sessions.findByName(key.chatId, target) ??
-    sessions.findByTitle(key.chatId, target) ??
-    sessions.findByIdPrefix(key.chatId, target);
-
-  if (!match) {
-    await tg.sendMessage(
-      key.chatId,
-      `❌ Session not found: ${fmt.code(target)}\nUse /sessions to see available sessions.`,
-      undefined,
-      key.threadId,
-    );
-    return;
-  }
-
-  await resumeSession(key, match);
 }
 
 async function resumeSession(key: TopicKey, session: SessionInfo): Promise<void> {
@@ -1775,31 +1677,6 @@ async function handleJobs(key: TopicKey): Promise<void> {
   await sendGeneralKeyboard(key.chatId, lines.join("\n"), { inline_keyboard: buttons }, key.threadId);
 }
 
-async function handleCancel(key: TopicKey, jobId: string): Promise<void> {
-  const job = scheduler.findById(jobId);
-  if (!job || job.chatId !== key.chatId) {
-    await sendGeneralMessage(key.chatId, `❌ Job not found: ${fmt.code(jobId)}`, key.threadId);
-    return;
-  }
-  scheduler.delete(job.id);
-  await scheduler.save();
-  const label = job.name ?? job.prompt.slice(0, 40);
-  await sendGeneralMessage(key.chatId, `🗑 Cancelled: ${escapeHtml(label)} (${fmt.code(job.id)})`, key.threadId);
-}
-
-async function handlePause(key: TopicKey, jobId: string): Promise<void> {
-  const job = scheduler.findById(jobId);
-  if (!job || job.chatId !== key.chatId) {
-    await sendGeneralMessage(key.chatId, `❌ Job not found: ${fmt.code(jobId)}`, key.threadId);
-    return;
-  }
-  scheduler.toggle(job.id);
-  await scheduler.save();
-  const state = job.enabled ? "▶️ Resumed" : "⏸ Paused";
-  const label = job.name ?? job.prompt.slice(0, 40);
-  await sendGeneralMessage(key.chatId, `${state}: ${escapeHtml(label)} (${fmt.code(job.id)})`, key.threadId);
-}
-
 // ─── Scheduled job execution ─────────────────────────────────────────────────
 
 async function executeScheduledJob(job: ScheduledJob): Promise<void> {
@@ -1875,34 +1752,24 @@ async function handleHelp(key: TopicKey): Promise<void> {
       "🤖 <b>Telegram Claude Orchestrator</b>",
       "",
       ...headerLines,
-      "<b>Session Management:</b>",
+      "<b>Sessions:</b>",
       `${fmt.code("/new [path] [--name n]")} — New session`,
-      `${fmt.code("/resume [name|id]")} — Resume previous`,
-      `${fmt.code("/sessions")} — List sessions`,
-      `${fmt.code("/stop")} — Stop task / end session`,
+      `${fmt.code("/sessions")} — List + resume sessions`,
+      `${fmt.code("/stop")} — End session`,
       `${fmt.code("/compact")} — Fresh session, same directory`,
       "",
       "<b>Claude Code:</b>",
-      `${fmt.code("/cc [command]")} — Slash command menu / run`,
+      `${fmt.code("/cc [command]")} — Slash command pass-through`,
       `${fmt.code("/mode [normal|plan|auto]")} — Permission mode`,
-      `${fmt.code("/model [name]")} — View or change model`,
-      `${fmt.code("/cost")} — Session cost so far`,
-      `${fmt.code("/status")} — Full session info`,
-      "",
-      "<b>Directories:</b>",
-      `${fmt.code("/dirs")} — Bookmarks + recent dirs`,
-      `${fmt.code("/bookmark /path --name alias")} — Save shortcut`,
+      `${fmt.code("/model [name]")} — Switch model`,
+      `${fmt.code("/cost")} — Session cost`,
+      `${fmt.code("/status")} — Session info`,
       "",
       "<b>Scheduling:</b>",
       `${fmt.code('/schedule "prompt" <when>')} — Schedule a job`,
-      `${fmt.code("/jobs")} — List scheduled jobs`,
-      `${fmt.code("/cancel <id>")} — Cancel a job`,
-      `${fmt.code("/pause <id>")} — Pause/resume a job`,
+      `${fmt.code("/jobs")} — List jobs (pause/cancel inline)`,
       "",
-      "<b>Admin:</b>",
-      `${fmt.code("/approve CODE")} — Approve pairing code`,
-      "",
-      "Send any text to interact with Claude.",
+      "Send text in a session topic to chat with Claude.",
     ].join("\n"),
     key.threadId,
   );
@@ -2026,55 +1893,6 @@ async function handleMode(key: TopicKey, mode?: PermissionMode): Promise<void> {
     undefined,
     key.threadId,
   );
-}
-
-// ─── /dirs + /bookmark — directory management ─────────────────────────────────
-
-async function handleDirs(key: TopicKey): Promise<void> {
-  // Just show the same navigable picker as /new
-  await showNewPicker(key);
-}
-
-async function handleBookmark(chatId: number, path?: string, name?: string): Promise<void> {
-  if (!path) {
-    // Show existing bookmarks with instructions
-    if (bookmarks.length === 0) {
-      await sendGeneralMessage(
-        chatId,
-        `No bookmarks yet.\n\nUsage: ${fmt.code("/bookmark /path/to/project --name alias")}`,
-      );
-    } else {
-      const lines = bookmarks.map((b) => `📌 ${fmt.code(b.name)} → ${fmt.code(b.path)}`);
-      await sendGeneralMessage(chatId, `<b>Bookmarks:</b>\n${lines.join("\n")}`);
-    }
-    return;
-  }
-
-  // Validate directory exists
-  try {
-    const s = await stat(path);
-    if (!s.isDirectory()) {
-      await sendGeneralMessage(chatId, `❌ Not a directory: ${fmt.code(path)}`);
-      return;
-    }
-  } catch {
-    await sendGeneralMessage(chatId, `❌ Directory not found: ${fmt.code(path)}`);
-    return;
-  }
-
-  const alias = name ?? path.split("/").pop() ?? "project";
-
-  // Update existing or add new
-  const existing = bookmarks.findIndex((b) => b.path === path);
-  const entry = existing >= 0 ? bookmarks[existing] : undefined;
-  if (entry) {
-    entry.name = alias;
-  } else {
-    bookmarks.push({ path, name: alias });
-  }
-  await saveBookmarks();
-
-  await sendGeneralMessage(chatId, `📌 Bookmarked ${fmt.code(alias)} → ${fmt.code(path)}`);
 }
 
 // ─── Claude subprocess management ─────────────────────────────────────────────
