@@ -211,6 +211,39 @@ describe("SessionManager", () => {
     expect(s.threadId).toBe(42);
   });
 
+  // ─── getAllActive / countProcessingJobs ─────────────────────────────────
+
+  test("getAllActive returns all active sessions across chats", () => {
+    const mgr = new SessionManager("/tmp/unused.json");
+    mgr.create(k(100), "/a", "sess-1");
+    mgr.create(k(200), "/b", "sess-2");
+    mgr.create(k(100, 42), "/c", "sess-3");
+
+    const all = mgr.getAllActive();
+    expect(all).toHaveLength(3);
+    expect(all.map((s) => s.sessionId).sort()).toEqual(["sess-1", "sess-2", "sess-3"]);
+  });
+
+  test("getAllActive returns empty when nothing is active", () => {
+    const mgr = new SessionManager("/tmp/unused.json");
+    expect(mgr.getAllActive()).toEqual([]);
+  });
+
+  test("countProcessingJobs counts only job keys for a chat", () => {
+    const mgr = new SessionManager("/tmp/unused.json");
+    // Interactive session processing
+    mgr.setProcessing(k(100), true);
+    // Job sessions processing
+    mgr.setProcessing(k(100, undefined, "job-1"), true);
+    mgr.setProcessing(k(100, undefined, "job-2"), true);
+    // Different chat's job
+    mgr.setProcessing(k(200, undefined, "job-3"), true);
+
+    expect(mgr.countProcessingJobs(100)).toBe(2);
+    expect(mgr.countProcessingJobs(200)).toBe(1);
+    expect(mgr.countProcessingJobs(300)).toBe(0);
+  });
+
   // ─── Persistence ───────────────────────────────────────────────────────
 
   describe("load / save", () => {

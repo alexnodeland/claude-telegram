@@ -123,6 +123,21 @@ export class SessionManager {
     }
   }
 
+  /** Return all active sessions (across all chats). */
+  getAllActive(): SessionInfo[] {
+    return Array.from(this.active.values());
+  }
+
+  /** Count processing entries that are job sessions for a given chat. */
+  countProcessingJobs(chatId: number): number {
+    let count = 0;
+    const prefix = `${chatId}:job:`;
+    for (const k of this.processing) {
+      if (k.startsWith(prefix)) count++;
+    }
+    return count;
+  }
+
   isProcessing(key: TopicKey): boolean {
     return this.processing.has(topicKeyStr(key));
   }

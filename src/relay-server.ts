@@ -96,10 +96,12 @@ export async function startRelayServer(
             prompt: string;
             name?: string;
             recurring?: boolean;
+            threadId?: number;
           };
           const job = scheduler.create(body.chatId, body.cwd, body.cronExpr, body.prompt, {
             name: body.name,
             recurring: body.recurring ?? true,
+            threadId: body.threadId,
           });
           await scheduler.save();
           return Response.json({ ok: true, job });

@@ -32,6 +32,21 @@ describe("ScheduleManager", () => {
     expect(job.sessionId).toBe("sess-abc");
   });
 
+  test("create with threadId stores it on the job", () => {
+    const mgr = new ScheduleManager("/tmp/unused.json");
+    const job = mgr.create(100, "/tmp", "0 9 * * *", "deploy", {
+      name: "forum-job",
+      threadId: 42,
+    });
+    expect(job.threadId).toBe(42);
+  });
+
+  test("create without threadId leaves it undefined", () => {
+    const mgr = new ScheduleManager("/tmp/unused.json");
+    const job = mgr.create(100, "/tmp", "0 9 * * *", "deploy");
+    expect(job.threadId).toBeUndefined();
+  });
+
   test("create generates unique IDs", () => {
     const mgr = new ScheduleManager("/tmp/unused.json");
     const j1 = mgr.create(100, "/tmp", "* * * * *", "a");

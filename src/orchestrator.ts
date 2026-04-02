@@ -32,13 +32,20 @@ import {
   saveAccessState,
 } from "./access.js";
 import { parseCommand } from "./commands.js";
-import { loadConfig, SCHEDULER_CHECK_INTERVAL_MS, TYPING_INTERVAL_MS } from "./config.js";
+import {
+  loadConfig,
+  MAX_CONCURRENT_JOBS_PER_CHAT,
+  MAX_SESSIONS_PER_CHAT,
+  SCHEDULER_CHECK_INTERVAL_MS,
+  TYPING_INTERVAL_MS,
+} from "./config.js";
 import { escapeHtml, fmt } from "./html.js";
 import { type RelayServer, startRelayServer } from "./relay-server.js";
 import { parseScheduleExpression, ScheduleManager } from "./scheduler.js";
 import { SessionManager } from "./sessions.js";
 import { StreamingRenderer } from "./streaming.js";
 import { TelegramClient } from "./telegram.js";
+import { TopicManager } from "./topics.js";
 import type {
   AccessState,
   ClaudeMessage,
@@ -70,6 +77,7 @@ if (!config.botToken) {
 }
 
 const tg = new TelegramClient(config.botToken);
+const topics = new TopicManager(tg);
 
 const botInfo = await tg.getMe().catch((err: Error) => {
   process.stderr.write(`❌  Telegram connection failed: ${err.message}\n`);
@@ -91,6 +99,7 @@ if (preApproved) {
 
 const sessions = new SessionManager(join(config.dataDir, "sessions.json"));
 await sessions.load();
+topics.reconcile(sessions.getAllActive());
 
 // ─── Directory bookmarks ──────────────────────────────────────────────────────
 
@@ -458,6 +467,66 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
 
   const cmd = parseCommand(text);
 
+  // ─── Forum topic routing ─────────────────────────────────────────────
+  const isForum = await topics.isForum(chatId);
+  if (isForum) {
+    const isGeneralTopic = !message.is_topic_message;
+
+    const MANAGEMENT_COMMANDS: ReadonlySet<string> = new Set([
+      "new",
+      "resume",
+      "sessions",
+      "help",
+      "approve",
+      "schedule",
+      "schedule_help",
+      "jobs",
+      "cancel",
+      "pause",
+      "dirs",
+      "bookmark",
+    ]);
+
+    const SESSION_LOCAL_COMMANDS: ReadonlySet<string> = new Set([
+      "stop",
+      "compact",
+      "cost",
+      "status",
+      "cc",
+      "cc_menu",
+      "mode",
+      "model",
+      "prompt",
+    ]);
+
+    if (isGeneralTopic) {
+      if (cmd.type === "prompt") {
+        await tg.sendMessage(
+          chatId,
+          "Send prompts in a session topic.\nUse /new to create one.",
+          undefined,
+          key.threadId,
+        );
+        return;
+      }
+      if (!MANAGEMENT_COMMANDS.has(cmd.type) && cmd.type !== "unknown_command") {
+        await tg.sendMessage(
+          chatId,
+          "This command works in session topics.\nUse /sessions to find yours.",
+          undefined,
+          key.threadId,
+        );
+        return;
+      }
+    } else {
+      // Session topic
+      if (!SESSION_LOCAL_COMMANDS.has(cmd.type) && cmd.type !== "unknown_command") {
+        await tg.sendMessage(chatId, "Use this command in the General topic.", undefined, key.threadId);
+        return;
+      }
+    }
+  }
+
   switch (cmd.type) {
     case "new":
       await handleNew(key, cmd.cwd, cmd.name);
@@ -816,6 +885,21 @@ async function handleNew(key: TopicKey, cwd?: string, name?: string): Promise<vo
     return;
   }
 
+  // Forum concurrency limit
+  const isForum = await topics.isForum(key.chatId);
+  if (isForum) {
+    const activeCount = sessions.getActiveForChat(key.chatId).length;
+    if (activeCount >= MAX_SESSIONS_PER_CHAT) {
+      await tg.sendMessage(
+        key.chatId,
+        `❌ Session limit reached (max ${MAX_SESSIONS_PER_CHAT}).\nEnd a session with /stop first.`,
+        undefined,
+        key.threadId,
+      );
+      return;
+    }
+  }
+
   // If no path specified, show navigable directory picker
   if (!cwd) {
     await showNewPicker(key);
@@ -836,8 +920,34 @@ async function handleNew(key: TopicKey, cwd?: string, name?: string): Promise<vo
   }
 
   sessions.endActive(key);
-  sessions.create(key, targetCwd, "pending", name);
+  const session = sessions.create(key, targetCwd, "pending", name);
   await sessions.save();
+
+  // Create a Forum Topic for the session if in a forum chat
+  if (isForum) {
+    const topicName = name ?? targetCwd.split("/").pop() ?? "Claude";
+    try {
+      const threadId = await topics.createSessionTopic(key.chatId, topicName);
+      // Rekey session to the new topic
+      sessions.endActive(key);
+      session.threadId = threadId;
+      const newKey: TopicKey = { chatId: key.chatId, threadId };
+      sessions.setActive(newKey, session);
+      topics.registerThread(key.chatId, threadId, session.sessionId);
+      await sessions.save();
+
+      await tg.sendMessage(
+        key.chatId,
+        `🆕 New session in ${fmt.code(targetCwd)}\n${name ? `Name: <b>${escapeHtml(name)}</b>\n` : ""}\nSend a message in the topic to get started.`,
+        undefined,
+        threadId,
+      );
+      return;
+    } catch (err) {
+      process.stderr.write(`⚠️  Failed to create forum topic: ${err}\n`);
+      // Fall through to non-forum behavior
+    }
+  }
 
   await tg.sendMessage(
     key.chatId,
@@ -905,14 +1015,7 @@ async function handleResume(key: TopicKey, target?: string): Promise<void> {
 
     // Only one session — resume it directly
     const last = history[0] as SessionInfo;
-    sessions.setActive(key, last);
-    const label = last.name ?? last.title ?? `${last.sessionId.slice(0, 8)}…`;
-    await tg.sendMessage(
-      key.chatId,
-      `🔄 Resumed <b>${escapeHtml(label)}</b> in ${fmt.code(last.cwd)}\n\nSend a message to continue.`,
-      undefined,
-      key.threadId,
-    );
+    await resumeSession(key, last);
     return;
   }
 
@@ -931,11 +1034,60 @@ async function handleResume(key: TopicKey, target?: string): Promise<void> {
     return;
   }
 
-  sessions.setActive(key, match);
-  const matchLabel = match.name ?? match.title ?? `${match.sessionId.slice(0, 8)}…`;
+  await resumeSession(key, match);
+}
+
+async function resumeSession(key: TopicKey, session: SessionInfo): Promise<void> {
+  const label = session.name ?? session.title ?? `${session.sessionId.slice(0, 8)}…`;
+  const isForum = await topics.isForum(key.chatId);
+
+  if (isForum && session.threadId != null) {
+    // Try to reopen the existing topic
+    try {
+      await topics.reopenTopic(key.chatId, session.threadId);
+      const newKey: TopicKey = { chatId: key.chatId, threadId: session.threadId };
+      sessions.setActive(newKey, session);
+      topics.registerThread(key.chatId, session.threadId, session.sessionId);
+      await tg.sendMessage(
+        key.chatId,
+        `🔄 Resumed <b>${escapeHtml(label)}</b> in ${fmt.code(session.cwd)}\n\nContinue in the reopened topic.`,
+        undefined,
+        session.threadId,
+      );
+      return;
+    } catch {
+      // Topic was deleted — create a new one
+      process.stderr.write(`⚠️  Topic ${session.threadId} gone, creating new one\n`);
+    }
+  }
+
+  if (isForum) {
+    // Create a new forum topic for this resumed session
+    const topicName = session.name ?? session.title ?? session.sessionId.slice(0, 8);
+    try {
+      const threadId = await topics.createSessionTopic(key.chatId, topicName);
+      session.threadId = threadId;
+      const newKey: TopicKey = { chatId: key.chatId, threadId };
+      sessions.setActive(newKey, session);
+      topics.registerThread(key.chatId, threadId, session.sessionId);
+      await sessions.save();
+      await tg.sendMessage(
+        key.chatId,
+        `🔄 Resumed <b>${escapeHtml(label)}</b> in ${fmt.code(session.cwd)}\n\nSend a message in the topic to continue.`,
+        undefined,
+        threadId,
+      );
+      return;
+    } catch (err) {
+      process.stderr.write(`⚠️  Failed to create forum topic for resume: ${err}\n`);
+      // Fall through to non-forum behavior
+    }
+  }
+
+  sessions.setActive(key, session);
   await tg.sendMessage(
     key.chatId,
-    `🔄 Resumed <b>${escapeHtml(matchLabel)}</b> in ${fmt.code(match.cwd)}`,
+    `🔄 Resumed <b>${escapeHtml(label)}</b> in ${fmt.code(session.cwd)}`,
     undefined,
     key.threadId,
   );
@@ -1001,6 +1153,13 @@ async function handleStop(key: TopicKey): Promise<void> {
   sessionApprovedTools.delete(keyStr); // clear session-scoped permission memory
   if (session) {
     await sessions.save();
+
+    // Close forum topic if applicable
+    if (session.threadId != null) {
+      topics.unregisterThread(key.chatId, session.threadId);
+      await topics.closeTopic(key.chatId, session.threadId);
+    }
+
     await tg.sendMessage(
       key.chatId,
       "🛑 Session ended.\nUse /new to start a new one or /resume to continue a previous session.",
@@ -1166,6 +1325,7 @@ async function handleSchedule(
       name,
       recurring: parsed.recurring,
       sessionId: session?.sessionId !== "pending" ? session?.sessionId : undefined,
+      threadId: key.threadId,
     });
   } catch (err) {
     await tg.sendMessage(key.chatId, `❌ ${err instanceof Error ? err.message : String(err)}`, undefined, key.threadId);
@@ -1281,6 +1441,20 @@ async function handlePause(key: TopicKey, jobId: string): Promise<void> {
 // ─── Scheduled job execution ─────────────────────────────────────────────────
 
 async function executeScheduledJob(job: ScheduledJob): Promise<void> {
+  // Create a forum topic for the job if in a forum chat and no thread yet
+  if (job.threadId == null) {
+    const isForum = await topics.isForum(job.chatId);
+    if (isForum) {
+      try {
+        const jobName = job.name ?? job.prompt.slice(0, 30);
+        job.threadId = await topics.createJobTopic(job.chatId, jobName);
+        await scheduler.save();
+      } catch (err) {
+        process.stderr.write(`⚠️  Failed to create job topic: ${err}\n`);
+      }
+    }
+  }
+
   // Jobs use isolated TopicKey so they never touch interactive sessions
   const jobKey: TopicKey = { chatId: job.chatId, threadId: job.threadId, jobId: job.id };
 
@@ -1635,6 +1809,7 @@ async function runQuery(key: TopicKey, session: SessionInfo, prompt: string, rep
           RELAY_HTTP_PORT: String(relay.port),
           RELAY_CHAT_ID: String(chatId),
           SCHEDULER_CWD: session.cwd,
+          ...(key.threadId != null ? { RELAY_THREAD_ID: String(key.threadId) } : {}),
         },
       },
     },
@@ -1958,6 +2133,11 @@ const schedulerTimer = setInterval(async () => {
       const jobKey: TopicKey = { chatId: job.chatId, threadId: job.threadId, jobId: job.id };
       if (sessions.isProcessing(jobKey)) {
         process.stderr.write(`⏰  Skipping scheduled job ${job.id} — still running\n`);
+        continue;
+      }
+      // Enforce per-chat concurrent job limit
+      if (sessions.countProcessingJobs(job.chatId) >= MAX_CONCURRENT_JOBS_PER_CHAT) {
+        process.stderr.write(`⏰  Skipping scheduled job ${job.id} — concurrent job limit reached\n`);
         continue;
       }
       await executeScheduledJob(job);
