@@ -63,7 +63,8 @@ export type Command =
   | { type: "prompt"; text: string };
 
 export function parseCommand(text: string): Command {
-  const trimmed = text.trim();
+  // Strip @botname suffix that Telegram appends in group chats (e.g. /jobs@mybot → /jobs)
+  const trimmed = text.trim().replace(/^(\/\w+)@\w+/, "$1");
 
   if (trimmed === "/new" || trimmed.startsWith("/new ")) {
     const args = trimmed.slice(4).trim();
