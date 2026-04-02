@@ -48,7 +48,15 @@ import type {
   SessionInfo,
   TelegramCallbackQuery,
   TelegramMessage,
+  TopicKey,
+  TopicKeyString,
 } from "./types.js";
+import { topicKeyStr } from "./types.js";
+
+/** Extract a TopicKey from an incoming Telegram message. */
+function getTopicKey(message: TelegramMessage): TopicKey {
+  return { chatId: message.chat.id, threadId: message.message_thread_id };
+}
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
@@ -130,7 +138,7 @@ function getRecentDirs(chatId: number): string[] {
  * Telegram callback_data is limited to 64 bytes, so we can't embed full paths.
  * We store the current browsing path and subdirectory list per chat.
  */
-const dirBrowserState = new Map<number, { currentPath: string; children: string[] }>();
+const dirBrowserState = new Map<TopicKeyString, { currentPath: string; children: string[] }>();
 
 async function listSubdirs(dirPath: string): Promise<string[]> {
   const { readdirSync, statSync } = await import("node:fs");
@@ -153,9 +161,9 @@ async function listSubdirs(dirPath: string): Promise<string[]> {
 const DIR_PAGE_SIZE = 8;
 
 /** Show a directory browser at the given path with pagination. */
-async function showDirBrowser(chatId: number, dirPath: string, page = 0): Promise<void> {
+async function showDirBrowser(key: TopicKey, dirPath: string, page = 0): Promise<void> {
   const children = await listSubdirs(dirPath);
-  dirBrowserState.set(chatId, { currentPath: dirPath, children });
+  dirBrowserState.set(topicKeyStr(key), { currentPath: dirPath, children });
 
   const dirName = dirPath.split("/").pop() || dirPath;
   const header = `📂 <b>${escapeHtml(dirName)}</b>\n${fmt.code(dirPath)}`;
@@ -207,12 +215,12 @@ async function showDirBrowser(chatId: number, dirPath: string, page = 0): Promis
       ? `${header}${pageLabel}\n\n${pageItems.map((c) => `  📁 ${escapeHtml(c)}`).join("\n")}`
       : `${header}\n\n<i>No subdirectories</i>`;
 
-  await tg.sendMessageWithKeyboard(chatId, text, { inline_keyboard: buttons });
+  await tg.sendMessageWithKeyboard(key.chatId, text, { inline_keyboard: buttons }, key.threadId);
 }
 
 /** Show the initial /new picker with bookmarks, recent dirs, and home. */
-async function showNewPicker(chatId: number): Promise<void> {
-  const recent = getRecentDirs(chatId);
+async function showNewPicker(key: TopicKey): Promise<void> {
+  const recent = getRecentDirs(key.chatId);
   const shortcuts: Array<{ text: string; buttonText: string; path: string }> = [];
 
   // Add bookmarks
@@ -232,7 +240,7 @@ async function showNewPicker(chatId: number): Promise<void> {
 
   // Store all paths for index-based lookup
   const allPaths = shortcuts.map((s) => s.path);
-  dirBrowserState.set(chatId, { currentPath: DEFAULT_CWD, children: allPaths });
+  dirBrowserState.set(topicKeyStr(key), { currentPath: DEFAULT_CWD, children: allPaths });
 
   const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
 
@@ -252,9 +260,10 @@ async function showNewPicker(chatId: number): Promise<void> {
       : "<i>No bookmarks or recent sessions</i>";
 
   await tg.sendMessageWithKeyboard(
-    chatId,
+    key.chatId,
     `🆕 <b>New session — choose directory:</b>\n\n${lines}\n\nTap a shortcut or browse:`,
     { inline_keyboard: buttons },
+    key.threadId,
   );
 }
 
@@ -265,32 +274,33 @@ let globalPermissionMode: PermissionMode = "normal";
 // ─── Permission memory ────────────────────────────────────────────────────────
 // Tracks tools the user has approved at broader scope than "once".
 
-/** Session-scoped approvals: cleared when session ends. chatId → Set<toolName> */
-const sessionApprovedTools = new Map<number, Set<string>>();
+/** Session-scoped approvals: cleared when session ends. topicKey → Set<toolName> */
+const sessionApprovedTools = new Map<TopicKeyString, Set<string>>();
 
 /** Project-scoped approvals: persisted per cwd. cwd → Set<toolName> */
 const projectApprovedTools = new Map<string, Set<string>>();
 
-function isToolAutoApproved(chatId: number, toolName: string): boolean {
+function isToolAutoApproved(key: TopicKey, toolName: string): boolean {
   // Check session-scoped approvals
-  if (sessionApprovedTools.get(chatId)?.has(toolName)) return true;
+  if (sessionApprovedTools.get(topicKeyStr(key))?.has(toolName)) return true;
   // Check project-scoped approvals
-  const session = sessions.getActive(chatId);
+  const session = sessions.getActive(key);
   if (session && projectApprovedTools.get(session.cwd)?.has(toolName)) return true;
   return false;
 }
 
-function approveToolForSession(chatId: number, toolName: string): void {
-  let set = sessionApprovedTools.get(chatId);
+function approveToolForSession(key: TopicKey, toolName: string): void {
+  const k = topicKeyStr(key);
+  let set = sessionApprovedTools.get(k);
   if (!set) {
     set = new Set();
-    sessionApprovedTools.set(chatId, set);
+    sessionApprovedTools.set(k, set);
   }
   set.add(toolName);
 }
 
-function approveToolForProject(chatId: number, toolName: string): void {
-  const session = sessions.getActive(chatId);
+function approveToolForProject(key: TopicKey, toolName: string): void {
+  const session = sessions.getActive(key);
   if (!session) return;
   let set = projectApprovedTools.get(session.cwd);
   if (!set) {
@@ -302,12 +312,13 @@ function approveToolForProject(chatId: number, toolName: string): void {
 
 // Start the permission relay HTTP server with Telegram notification callback
 const relay: RelayServer = await startRelayServer(async (request) => {
-  const { chatId, toolName, toolInput } = request;
+  const { chatId, threadId, toolName, toolInput } = request;
+  const key: TopicKey = { chatId, threadId };
   const inp = toolInput as Record<string, unknown> | undefined;
 
   // Auto-approve if the user previously approved this tool at session or project scope
-  if (isToolAutoApproved(chatId, toolName)) {
-    relay.resolvePrompt(chatId, { behavior: "allow", updatedInput: toolInput });
+  if (isToolAutoApproved(key, toolName)) {
+    relay.resolvePrompt(key, { behavior: "allow", updatedInput: toolInput });
     return;
   }
 
@@ -315,26 +326,31 @@ const relay: RelayServer = await startRelayServer(async (request) => {
   const toolDesc = TOOL_DESCRIPTIONS[toolName] ?? toolName;
   let detail = `Tool: ${fmt.code(toolName)} — ${escapeHtml(toolDesc)}`;
   if (inp && Object.keys(inp).length > 0) {
-    const lines = Object.entries(inp).map(([key, val]) => {
+    const lines = Object.entries(inp).map(([k, val]) => {
       const valStr = typeof val === "string" ? val : JSON.stringify(val);
       const truncated = valStr.length > 200 ? `${valStr.slice(0, 200)}…` : valStr;
-      return `${key}: ${truncated}`;
+      return `${k}: ${truncated}`;
     });
     detail += `\n<pre>${escapeHtml(lines.join("\n"))}</pre>`;
   }
 
   // Build button rows with granular options
   const toolShort = toolName.length > 10 ? `${toolName.slice(0, 10)}…` : toolName;
-  await tg.sendMessageWithKeyboard(chatId, `🔒 <b>Permission required</b>\n${detail}\n\n<i>Expires in 2 min</i>`, {
-    inline_keyboard: [
-      [
-        { text: "✅ Allow once", callback_data: "permit:allow" },
-        { text: "❌ Deny", callback_data: "permit:deny" },
+  await tg.sendMessageWithKeyboard(
+    chatId,
+    `🔒 <b>Permission required</b>\n${detail}\n\n<i>Expires in 2 min</i>`,
+    {
+      inline_keyboard: [
+        [
+          { text: "✅ Allow once", callback_data: "permit:allow" },
+          { text: "❌ Deny", callback_data: "permit:deny" },
+        ],
+        [{ text: `✅ Allow ${toolShort} for session`, callback_data: `permit:session:${toolName}` }],
+        [{ text: `✅ Always allow ${toolShort} in project`, callback_data: `permit:project:${toolName}` }],
       ],
-      [{ text: `✅ Allow ${toolShort} for session`, callback_data: `permit:session:${toolName}` }],
-      [{ text: `✅ Always allow ${toolShort} in project`, callback_data: `permit:project:${toolName}` }],
-    ],
-  });
+    },
+    threadId,
+  );
 }, scheduler);
 
 // Human-readable tool descriptions for permission prompts
@@ -396,6 +412,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
   if (!userId) return;
 
   const chatId = message.chat.id;
+  const key = getTopicKey(message);
   const text = (message.text ?? "").trim();
 
   // Handle /start and /pair — generate pairing code
@@ -434,8 +451,8 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
   }
 
   // Check if this is a response to a pending permission/question prompt
-  if (relay.hasPending(chatId)) {
-    await handlePendingReply(chatId, text);
+  if (relay.hasPending(key)) {
+    await handlePendingReply(key, text);
     return;
   }
 
@@ -443,73 +460,75 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
 
   switch (cmd.type) {
     case "new":
-      await handleNew(chatId, cmd.cwd, cmd.name);
+      await handleNew(key, cmd.cwd, cmd.name);
       break;
     case "resume":
-      await handleResume(chatId, cmd.target);
+      await handleResume(key, cmd.target);
       break;
     case "sessions":
-      await handleListSessions(chatId);
+      await handleListSessions(key);
       break;
     case "stop":
-      await handleStop(chatId);
+      await handleStop(key);
       break;
     case "compact":
-      await handleCompact(chatId);
+      await handleCompact(key);
       break;
     case "model":
-      await handleModel(chatId, cmd.model);
+      await handleModel(key, cmd.model);
       break;
     case "cost":
-      await handleCost(chatId);
+      await handleCost(key);
       break;
     case "status":
-      await handleStatus(chatId);
+      await handleStatus(key);
       break;
     case "help":
-      await handleHelp(chatId);
+      await handleHelp(key);
       break;
     case "approve":
       await handleApprove(chatId, userId, cmd.code);
       break;
     case "cc":
-      await handleClaudeCommand(chatId, cmd.slashCommand, cmd.args, message.message_id);
+      await handleClaudeCommand(key, cmd.slashCommand, cmd.args, message.message_id);
       break;
     case "cc_menu":
-      await handleCcMenu(chatId);
+      await handleCcMenu(key);
       break;
     case "mode":
-      await handleMode(chatId, cmd.mode);
+      await handleMode(key, cmd.mode);
       break;
     case "dirs":
-      await handleDirs(chatId);
+      await handleDirs(key);
       break;
     case "bookmark":
       await handleBookmark(chatId, cmd.path, cmd.name);
       break;
     case "schedule":
-      await handleSchedule(chatId, cmd.prompt, cmd.scheduleExpr, cmd.name, cmd.cwd);
+      await handleSchedule(key, cmd.prompt, cmd.scheduleExpr, cmd.name, cmd.cwd);
       break;
     case "schedule_help":
       await handleScheduleHelp(chatId);
       break;
     case "jobs":
-      await handleJobs(chatId);
+      await handleJobs(key);
       break;
     case "cancel":
-      await handleCancel(chatId, cmd.jobId);
+      await handleCancel(key, cmd.jobId);
       break;
     case "pause":
-      await handlePause(chatId, cmd.jobId);
+      await handlePause(key, cmd.jobId);
       break;
     case "unknown_command":
       await tg.sendMessage(
         chatId,
         `Unknown command: ${fmt.code(cmd.text)}\nUse /help for available commands, or send without / to chat with Claude.`,
+        undefined,
+        key.threadId,
       );
       break;
     case "prompt":
-      await handlePrompt(chatId, cmd.text, message.message_id);
+      await handlePrompt(key, cmd.text, message.message_id);
       break;
   }
 }
@@ -521,13 +540,17 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
   const chatId = query.message?.chat.id;
   if (!chatId) return;
 
+  // Extract threadId from the callback's original message for correct topic routing
+  const threadId = query.message?.message_thread_id;
+  const key: TopicKey = { chatId, threadId };
+
   // Permission prompt callbacks
   if (data.startsWith("permit:")) {
-    const pending = relay.getPending(chatId);
+    const pending = relay.getPending(key);
 
     // "permit:allow" — allow once
     if (data === "permit:allow") {
-      relay.resolvePrompt(chatId, {
+      relay.resolvePrompt(key, {
         behavior: "allow",
         ...(pending ? { updatedInput: pending.toolInput } : {}),
       });
@@ -540,7 +563,7 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
 
     // "permit:deny" — deny
     if (data === "permit:deny") {
-      relay.resolvePrompt(chatId, { behavior: "deny" });
+      relay.resolvePrompt(key, { behavior: "deny" });
       await tg.answerCallbackQuery(query.id, "❌ Denied");
       if (query.message) {
         await tg.editMessageText(chatId, query.message.message_id, "❌ Denied").catch(() => undefined);
@@ -552,8 +575,8 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
     const sessionMatch = data.match(/^permit:session:(.+)$/);
     if (sessionMatch?.[1]) {
       const tool = sessionMatch[1];
-      approveToolForSession(chatId, tool);
-      relay.resolvePrompt(chatId, {
+      approveToolForSession(key, tool);
+      relay.resolvePrompt(key, {
         behavior: "allow",
         ...(pending ? { updatedInput: pending.toolInput } : {}),
       });
@@ -570,13 +593,13 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
     const projectMatch = data.match(/^permit:project:(.+)$/);
     if (projectMatch?.[1]) {
       const tool = projectMatch[1];
-      approveToolForProject(chatId, tool);
-      approveToolForSession(chatId, tool); // also approve for current session
-      relay.resolvePrompt(chatId, {
+      approveToolForProject(key, tool);
+      approveToolForSession(key, tool); // also approve for current session
+      relay.resolvePrompt(key, {
         behavior: "allow",
         ...(pending ? { updatedInput: pending.toolInput } : {}),
       });
-      const session = sessions.getActive(chatId);
+      const session = sessions.getActive(key);
       const dir = session?.cwd.split("/").pop() ?? "project";
       await tg.answerCallbackQuery(query.id, `✅ ${tool} always allowed in ${dir}`);
       if (query.message) {
@@ -596,7 +619,7 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
   const resumeMatch = data.match(/^resume:(.+)$/);
   if (resumeMatch?.[1]) {
     await tg.answerCallbackQuery(query.id, "🔄 Resuming…");
-    await handleResume(chatId, resumeMatch[1]);
+    await handleResume(key, resumeMatch[1]);
     return;
   }
 
@@ -604,7 +627,7 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
   const modelMatch = data.match(/^model:(.+)$/);
   if (modelMatch?.[1]) {
     await tg.answerCallbackQuery(query.id, `✅ Switching to ${modelMatch[1]}`);
-    await handleModel(chatId, modelMatch[1]);
+    await handleModel(key, modelMatch[1]);
     return;
   }
 
@@ -614,13 +637,13 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
     await tg.answerCallbackQuery(query.id);
     switch (quickMatch[1]) {
       case "new":
-        await handleNew(chatId);
+        await handleNew(key);
         break;
       case "sessions":
-        await handleListSessions(chatId);
+        await handleListSessions(key);
         break;
       case "help":
-        await handleHelp(chatId);
+        await handleHelp(key);
         break;
     }
     return;
@@ -630,7 +653,7 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
   const ccMatch = data.match(/^cc:(.+)$/);
   if (ccMatch?.[1]) {
     await tg.answerCallbackQuery(query.id, `Running /${ccMatch[1]}…`);
-    await handleClaudeCommand(chatId, ccMatch[1], "");
+    await handleClaudeCommand(key, ccMatch[1], "");
     return;
   }
 
@@ -638,26 +661,27 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
   const navMatch = data.match(/^nav:(.+)$/);
   if (navMatch?.[1]) {
     const action = navMatch[1];
-    const state = dirBrowserState.get(chatId);
+    const keyStr = topicKeyStr(key);
+    const state = dirBrowserState.get(keyStr);
 
     if (action === "start" && state) {
       // Confirm — create session in current directory
       await tg.answerCallbackQuery(query.id, "🆕 Creating session…");
-      await handleNew(chatId, state.currentPath);
-      dirBrowserState.delete(chatId);
+      await handleNew(key, state.currentPath);
+      dirBrowserState.delete(keyStr);
       return;
     }
 
     if (action === "up" && state) {
       const parent = resolve(state.currentPath, "..");
       await tg.answerCallbackQuery(query.id, `⬆️ ${parent.split("/").pop() ?? "/"}`);
-      await showDirBrowser(chatId, parent);
+      await showDirBrowser(key, parent);
       return;
     }
 
     if (action === "browse_home") {
       await tg.answerCallbackQuery(query.id, "🏠 Browsing…");
-      await showDirBrowser(chatId, DEFAULT_CWD);
+      await showDirBrowser(key, DEFAULT_CWD);
       return;
     }
 
@@ -670,7 +694,7 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
     const pageMatch = action.match(/^page_(\d+)$/);
     if (pageMatch?.[1] && state) {
       await tg.answerCallbackQuery(query.id);
-      await showDirBrowser(chatId, state.currentPath, Number(pageMatch[1]));
+      await showDirBrowser(key, state.currentPath, Number(pageMatch[1]));
       return;
     }
 
@@ -681,7 +705,7 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
       const path = state.children[idx];
       if (path) {
         await tg.answerCallbackQuery(query.id, `📂 ${path.split("/").pop()}`);
-        await showDirBrowser(chatId, path);
+        await showDirBrowser(key, path);
         return;
       }
     }
@@ -693,7 +717,7 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
       if (subdir) {
         const fullPath = subdir.startsWith("/") ? subdir : join(state.currentPath, subdir);
         await tg.answerCallbackQuery(query.id, `📁 ${subdir}`);
-        await showDirBrowser(chatId, fullPath);
+        await showDirBrowser(key, fullPath);
         return;
       }
     }
@@ -744,7 +768,7 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
   const modeMatch = data.match(/^mode:(.+)$/);
   if (modeMatch?.[1]) {
     await tg.answerCallbackQuery(query.id, `✅ ${modeMatch[1]} mode`);
-    await handleMode(chatId, modeMatch[1] as PermissionMode);
+    await handleMode(key, modeMatch[1] as PermissionMode);
     return;
   }
 
@@ -752,15 +776,15 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
 }
 
 /** Handle text reply to a pending AskUserQuestion prompt. */
-async function handlePendingReply(chatId: number, text: string): Promise<void> {
-  const pending = relay.getPending(chatId);
+async function handlePendingReply(key: TopicKey, text: string): Promise<void> {
+  const pending = relay.getPending(key);
   if (!pending) return;
 
   // For AskUserQuestion, wrap the answer
   if (pending.toolName === "AskUserQuestion") {
     const questions = (pending.toolInput as { questions?: Array<{ question: string }> })?.questions;
     const firstQuestion = questions?.[0]?.question ?? "";
-    relay.resolvePrompt(chatId, {
+    relay.resolvePrompt(key, {
       behavior: "allow",
       updatedInput: {
         ...(pending.toolInput as Record<string, unknown>),
@@ -770,26 +794,31 @@ async function handlePendingReply(chatId: number, text: string): Promise<void> {
   } else {
     // For other tools, treat as allow/deny
     const isAllow = /^(y|yes|allow|ok|approve)/i.test(text.trim());
-    relay.resolvePrompt(chatId, {
+    relay.resolvePrompt(key, {
       behavior: isAllow ? "allow" : "deny",
       ...(isAllow ? { updatedInput: pending.toolInput } : {}),
     });
   }
 
-  await tg.sendMessage(chatId, `✅ Response recorded.`);
+  await tg.sendMessage(key.chatId, "✅ Response recorded.", undefined, key.threadId);
 }
 
 // ─── Command handlers ─────────────────────────────────────────────────────────
 
-async function handleNew(chatId: number, cwd?: string, name?: string): Promise<void> {
-  if (sessions.isProcessing(chatId)) {
-    await tg.sendMessage(chatId, "⏳ A task is still running. Wait for it to finish or /stop first.");
+async function handleNew(key: TopicKey, cwd?: string, name?: string): Promise<void> {
+  if (sessions.isProcessing(key)) {
+    await tg.sendMessage(
+      key.chatId,
+      "⏳ A task is still running. Wait for it to finish or /stop first.",
+      undefined,
+      key.threadId,
+    );
     return;
   }
 
   // If no path specified, show navigable directory picker
   if (!cwd) {
-    await showNewPicker(chatId);
+    await showNewPicker(key);
     return;
   }
 
@@ -798,35 +827,42 @@ async function handleNew(chatId: number, cwd?: string, name?: string): Promise<v
   try {
     const s = await stat(targetCwd);
     if (!s.isDirectory()) {
-      await tg.sendMessage(chatId, `❌ Not a directory: ${fmt.code(targetCwd)}`);
+      await tg.sendMessage(key.chatId, `❌ Not a directory: ${fmt.code(targetCwd)}`, undefined, key.threadId);
       return;
     }
   } catch {
-    await tg.sendMessage(chatId, `❌ Directory not found: ${fmt.code(targetCwd)}`);
+    await tg.sendMessage(key.chatId, `❌ Directory not found: ${fmt.code(targetCwd)}`, undefined, key.threadId);
     return;
   }
 
-  sessions.endActive(chatId);
-  sessions.create(chatId, targetCwd, "pending", name);
+  sessions.endActive(key);
+  sessions.create(key, targetCwd, "pending", name);
   await sessions.save();
 
   await tg.sendMessage(
-    chatId,
+    key.chatId,
     `🆕 New session in ${fmt.code(targetCwd)}\n${name ? `Name: <b>${escapeHtml(name)}</b>\n` : ""}\nSend a message to get started.`,
+    undefined,
+    key.threadId,
   );
 }
 
-async function handleResume(chatId: number, target?: string): Promise<void> {
-  if (sessions.isProcessing(chatId)) {
-    await tg.sendMessage(chatId, "⏳ A task is still running. Wait for it to finish or /stop first.");
+async function handleResume(key: TopicKey, target?: string): Promise<void> {
+  if (sessions.isProcessing(key)) {
+    await tg.sendMessage(
+      key.chatId,
+      "⏳ A task is still running. Wait for it to finish or /stop first.",
+      undefined,
+      key.threadId,
+    );
     return;
   }
 
-  const history = sessions.listForChat(chatId);
+  const history = sessions.listForChat(key.chatId);
 
   if (!target) {
     if (history.length === 0) {
-      await tg.sendMessage(chatId, "No previous sessions. Use /new to start one.");
+      await tg.sendMessage(key.chatId, "No previous sessions. Use /new to start one.", undefined, key.threadId);
       return;
     }
 
@@ -856,46 +892,63 @@ async function handleResume(chatId: number, target?: string): Promise<void> {
         if (row.length > 0) buttonRows.push(row);
       }
 
-      await tg.sendMessageWithKeyboard(chatId, `🔄 <b>Resume which session?</b>\n\n${lines.join("\n")}`, {
-        inline_keyboard: buttonRows,
-      });
+      await tg.sendMessageWithKeyboard(
+        key.chatId,
+        `🔄 <b>Resume which session?</b>\n\n${lines.join("\n")}`,
+        {
+          inline_keyboard: buttonRows,
+        },
+        key.threadId,
+      );
       return;
     }
 
     // Only one session — resume it directly
     const last = history[0] as SessionInfo;
-    sessions.setActive(chatId, last);
+    sessions.setActive(key, last);
     const label = last.name ?? last.title ?? `${last.sessionId.slice(0, 8)}…`;
     await tg.sendMessage(
-      chatId,
+      key.chatId,
       `🔄 Resumed <b>${escapeHtml(label)}</b> in ${fmt.code(last.cwd)}\n\nSend a message to continue.`,
+      undefined,
+      key.threadId,
     );
     return;
   }
 
   const match =
-    sessions.findByName(chatId, target) ??
-    sessions.findByTitle(chatId, target) ??
-    sessions.findByIdPrefix(chatId, target);
+    sessions.findByName(key.chatId, target) ??
+    sessions.findByTitle(key.chatId, target) ??
+    sessions.findByIdPrefix(key.chatId, target);
 
   if (!match) {
-    await tg.sendMessage(chatId, `❌ Session not found: ${fmt.code(target)}\nUse /sessions to see available sessions.`);
+    await tg.sendMessage(
+      key.chatId,
+      `❌ Session not found: ${fmt.code(target)}\nUse /sessions to see available sessions.`,
+      undefined,
+      key.threadId,
+    );
     return;
   }
 
-  sessions.setActive(chatId, match);
+  sessions.setActive(key, match);
   const matchLabel = match.name ?? match.title ?? `${match.sessionId.slice(0, 8)}…`;
-  await tg.sendMessage(chatId, `🔄 Resumed <b>${escapeHtml(matchLabel)}</b> in ${fmt.code(match.cwd)}`);
+  await tg.sendMessage(
+    key.chatId,
+    `🔄 Resumed <b>${escapeHtml(matchLabel)}</b> in ${fmt.code(match.cwd)}`,
+    undefined,
+    key.threadId,
+  );
 }
 
-async function handleListSessions(chatId: number): Promise<void> {
-  const history = sessions.listForChat(chatId);
+async function handleListSessions(key: TopicKey): Promise<void> {
+  const history = sessions.listForChat(key.chatId);
   if (history.length === 0) {
-    await tg.sendMessage(chatId, "No sessions yet. Use /new to start one.");
+    await tg.sendMessage(key.chatId, "No sessions yet. Use /new to start one.", undefined, key.threadId);
     return;
   }
 
-  const active = sessions.getActive(chatId);
+  const active = sessions.getActive(key);
   const lines = history.slice(0, 10).map((s) => {
     const marker = active?.sessionId === s.sessionId ? " 👈" : "";
     const label = s.name ?? s.title ?? s.sessionId.slice(0, 8);
@@ -925,71 +978,96 @@ async function handleListSessions(chatId: number): Promise<void> {
     buttonRows.push(row);
   }
 
-  await tg.sendMessageWithKeyboard(chatId, `📋 <b>Sessions:</b>\n\n${lines.join("\n")}`, {
-    inline_keyboard: buttonRows,
-  });
+  await tg.sendMessageWithKeyboard(
+    key.chatId,
+    `📋 <b>Sessions:</b>\n\n${lines.join("\n")}`,
+    {
+      inline_keyboard: buttonRows,
+    },
+    key.threadId,
+  );
 }
 
-async function handleStop(chatId: number): Promise<void> {
-  const proc = activeProcs.get(chatId);
+async function handleStop(key: TopicKey): Promise<void> {
+  const keyStr = topicKeyStr(key);
+  const proc = activeProcs.get(keyStr);
   if (proc) {
     proc.kill();
-    activeProcs.delete(chatId);
+    activeProcs.delete(keyStr);
   }
-  sessions.setProcessing(chatId, false);
+  sessions.setProcessing(key, false);
 
-  const session = sessions.endActive(chatId);
-  sessionApprovedTools.delete(chatId); // clear session-scoped permission memory
+  const session = sessions.endActive(key);
+  sessionApprovedTools.delete(keyStr); // clear session-scoped permission memory
   if (session) {
     await sessions.save();
     await tg.sendMessage(
-      chatId,
+      key.chatId,
       "🛑 Session ended.\nUse /new to start a new one or /resume to continue a previous session.",
+      undefined,
+      key.threadId,
     );
   } else {
-    await tg.sendMessage(chatId, "No active session. Use /new to start one or /resume to continue.");
+    await tg.sendMessage(
+      key.chatId,
+      "No active session. Use /new to start one or /resume to continue.",
+      undefined,
+      key.threadId,
+    );
   }
 }
 
-async function handleCompact(chatId: number): Promise<void> {
-  const session = sessions.getActive(chatId);
+async function handleCompact(key: TopicKey): Promise<void> {
+  const session = sessions.getActive(key);
   if (!session) {
-    await tg.sendMessage(chatId, "No active session. Use /new to start one or /resume to continue.");
+    await tg.sendMessage(
+      key.chatId,
+      "No active session. Use /new to start one or /resume to continue.",
+      undefined,
+      key.threadId,
+    );
     return;
   }
-  if (sessions.isProcessing(chatId)) {
-    await tg.sendMessage(chatId, "⏳ Wait for the current task to finish first.");
+  if (sessions.isProcessing(key)) {
+    await tg.sendMessage(key.chatId, "⏳ Wait for the current task to finish first.", undefined, key.threadId);
     return;
   }
 
   const cwd = session.cwd;
   const name = session.name;
-  sessions.endActive(chatId);
-  sessions.create(chatId, cwd, "pending", name);
+  sessions.endActive(key);
+  sessions.create(key, cwd, "pending", name);
   await sessions.save();
 
   await tg.sendMessage(
-    chatId,
+    key.chatId,
     `🔄 Fresh session in ${fmt.code(cwd)}\n` +
       `Previous session preserved — use /resume to switch back.\n\n` +
       `Send a message to get started.`,
+    undefined,
+    key.threadId,
   );
 }
 
-async function handleModel(chatId: number, model?: string): Promise<void> {
-  const session = sessions.getActive(chatId);
+async function handleModel(key: TopicKey, model?: string): Promise<void> {
+  const session = sessions.getActive(key);
 
   if (!model) {
     const current = session?.model ?? globalModel ?? "(default)";
-    await tg.sendMessageWithKeyboard(chatId, `Current model: ${fmt.code(current)}\n\nTap to switch:`, {
-      inline_keyboard: [
-        [
-          { text: "sonnet", callback_data: "model:sonnet" },
-          { text: "opus", callback_data: "model:opus" },
-          { text: "haiku", callback_data: "model:haiku" },
+    await tg.sendMessageWithKeyboard(
+      key.chatId,
+      `Current model: ${fmt.code(current)}\n\nTap to switch:`,
+      {
+        inline_keyboard: [
+          [
+            { text: "sonnet", callback_data: "model:sonnet" },
+            { text: "opus", callback_data: "model:opus" },
+            { text: "haiku", callback_data: "model:haiku" },
+          ],
         ],
-      ],
-    });
+      },
+      key.threadId,
+    );
     return;
   }
 
@@ -998,25 +1076,25 @@ async function handleModel(chatId: number, model?: string): Promise<void> {
     await sessions.save();
   }
   globalModel = model;
-  await tg.sendMessage(chatId, `✅ Model set to ${fmt.code(model)}`);
+  await tg.sendMessage(key.chatId, `✅ Model set to ${fmt.code(model)}`, undefined, key.threadId);
 }
 
-async function handleCost(chatId: number): Promise<void> {
-  const session = sessions.getActive(chatId);
+async function handleCost(key: TopicKey): Promise<void> {
+  const session = sessions.getActive(key);
   if (!session) {
-    await tg.sendMessage(chatId, "No active session. Start one with /new or /resume.");
+    await tg.sendMessage(key.chatId, "No active session. Start one with /new or /resume.", undefined, key.threadId);
     return;
   }
 
   const cost = (session.totalCost ?? 0).toFixed(4);
   const turns = session.totalTurns ?? 0;
-  await tg.sendMessage(chatId, `💰 Session cost: <b>$${cost}</b>\nTotal turns: ${turns}`);
+  await tg.sendMessage(key.chatId, `💰 Session cost: <b>$${cost}</b>\nTotal turns: ${turns}`, undefined, key.threadId);
 }
 
-async function handleStatus(chatId: number): Promise<void> {
-  const session = sessions.getActive(chatId);
+async function handleStatus(key: TopicKey): Promise<void> {
+  const session = sessions.getActive(key);
   if (!session) {
-    await tg.sendMessage(chatId, "No active session. Use /new to start one.");
+    await tg.sendMessage(key.chatId, "No active session. Use /new to start one.", undefined, key.threadId);
     return;
   }
 
@@ -1024,12 +1102,12 @@ async function handleStatus(chatId: number): Promise<void> {
     session.sessionId === "pending" ? "(new — not yet started)" : fmt.code(`${session.sessionId.slice(0, 12)}…`);
   const model = session.model ?? globalModel ?? "(default)";
   const cost = (session.totalCost ?? 0).toFixed(4);
-  const processing = sessions.isProcessing(chatId) ? "🟢 Running" : "⚪ Idle";
+  const processing = sessions.isProcessing(key) ? "🟢 Running" : "⚪ Idle";
 
   await tg.sendMessage(
-    chatId,
+    key.chatId,
     [
-      `📊 <b>Session Status</b>`,
+      "📊 <b>Session Status</b>",
       `Session: ${id}`,
       session.name ? `Name: <b>${escapeHtml(session.name)}</b>` : null,
       `Directory: ${fmt.code(session.cwd)}`,
@@ -1041,52 +1119,56 @@ async function handleStatus(chatId: number): Promise<void> {
     ]
       .filter(Boolean)
       .join("\n"),
+    undefined,
+    key.threadId,
   );
 }
 
 // ─── Scheduling handlers ──────────────────────────────────────────────────────
 
 async function handleSchedule(
-  chatId: number,
+  key: TopicKey,
   prompt: string,
   scheduleExpr: string,
   name?: string,
   cwd?: string,
 ): Promise<void> {
-  const session = sessions.getActive(chatId);
+  const session = sessions.getActive(key);
   const jobCwd = cwd ?? session?.cwd ?? DEFAULT_CWD;
 
   // Validate directory
   try {
     const s = await stat(jobCwd);
     if (!s.isDirectory()) {
-      await tg.sendMessage(chatId, `❌ Not a directory: ${fmt.code(jobCwd)}`);
+      await tg.sendMessage(key.chatId, `❌ Not a directory: ${fmt.code(jobCwd)}`, undefined, key.threadId);
       return;
     }
   } catch {
-    await tg.sendMessage(chatId, `❌ Directory not found: ${fmt.code(jobCwd)}`);
+    await tg.sendMessage(key.chatId, `❌ Directory not found: ${fmt.code(jobCwd)}`, undefined, key.threadId);
     return;
   }
 
   const parsed = parseScheduleExpression(scheduleExpr);
   if (!parsed) {
     await tg.sendMessage(
-      chatId,
+      key.chatId,
       `❌ Invalid schedule: ${fmt.code(scheduleExpr)}\n\n` +
         "Examples: every 30m, every 2h, at 9am weekdays, cron */15 * * * *",
+      undefined,
+      key.threadId,
     );
     return;
   }
 
   let job: ScheduledJob;
   try {
-    job = scheduler.create(chatId, jobCwd, parsed.cronExpr, prompt, {
+    job = scheduler.create(key.chatId, jobCwd, parsed.cronExpr, prompt, {
       name,
       recurring: parsed.recurring,
       sessionId: session?.sessionId !== "pending" ? session?.sessionId : undefined,
     });
   } catch (err) {
-    await tg.sendMessage(chatId, `❌ ${err instanceof Error ? err.message : String(err)}`);
+    await tg.sendMessage(key.chatId, `❌ ${err instanceof Error ? err.message : String(err)}`, undefined, key.threadId);
     return;
   }
 
@@ -1096,7 +1178,7 @@ async function handleSchedule(
   const label = name ? fmt.bold(escapeHtml(name)) : fmt.code(prompt.slice(0, 50));
 
   await tg.sendMessageWithKeyboard(
-    chatId,
+    key.chatId,
     [
       `⏰ <b>Scheduled${parsed.recurring ? "" : " (one-shot)"}</b>`,
       "",
@@ -1109,6 +1191,7 @@ async function handleSchedule(
     {
       inline_keyboard: [[{ text: "🗑 Cancel", callback_data: `job:cancel:${job.id}` }]],
     },
+    key.threadId,
   );
 }
 
@@ -1139,10 +1222,10 @@ async function handleScheduleHelp(chatId: number): Promise<void> {
   );
 }
 
-async function handleJobs(chatId: number): Promise<void> {
-  const jobs = scheduler.list(chatId);
+async function handleJobs(key: TopicKey): Promise<void> {
+  const jobs = scheduler.list(key.chatId);
   if (jobs.length === 0) {
-    await tg.sendMessage(chatId, "No scheduled jobs. Use /schedule to create one.");
+    await tg.sendMessage(key.chatId, "No scheduled jobs. Use /schedule to create one.", undefined, key.threadId);
     return;
   }
 
@@ -1167,58 +1250,61 @@ async function handleJobs(chatId: number): Promise<void> {
     ]);
   }
 
-  await tg.sendMessageWithKeyboard(chatId, lines.join("\n"), { inline_keyboard: buttons });
+  await tg.sendMessageWithKeyboard(key.chatId, lines.join("\n"), { inline_keyboard: buttons }, key.threadId);
 }
 
-async function handleCancel(chatId: number, jobId: string): Promise<void> {
+async function handleCancel(key: TopicKey, jobId: string): Promise<void> {
   const job = scheduler.findById(jobId);
-  if (!job || job.chatId !== chatId) {
-    await tg.sendMessage(chatId, `❌ Job not found: ${fmt.code(jobId)}`);
+  if (!job || job.chatId !== key.chatId) {
+    await tg.sendMessage(key.chatId, `❌ Job not found: ${fmt.code(jobId)}`, undefined, key.threadId);
     return;
   }
   scheduler.delete(job.id);
   await scheduler.save();
   const label = job.name ?? job.prompt.slice(0, 40);
-  await tg.sendMessage(chatId, `🗑 Cancelled: ${escapeHtml(label)} (${fmt.code(job.id)})`);
+  await tg.sendMessage(key.chatId, `🗑 Cancelled: ${escapeHtml(label)} (${fmt.code(job.id)})`, undefined, key.threadId);
 }
 
-async function handlePause(chatId: number, jobId: string): Promise<void> {
+async function handlePause(key: TopicKey, jobId: string): Promise<void> {
   const job = scheduler.findById(jobId);
-  if (!job || job.chatId !== chatId) {
-    await tg.sendMessage(chatId, `❌ Job not found: ${fmt.code(jobId)}`);
+  if (!job || job.chatId !== key.chatId) {
+    await tg.sendMessage(key.chatId, `❌ Job not found: ${fmt.code(jobId)}`, undefined, key.threadId);
     return;
   }
   scheduler.toggle(job.id);
   await scheduler.save();
   const state = job.enabled ? "▶️ Resumed" : "⏸ Paused";
   const label = job.name ?? job.prompt.slice(0, 40);
-  await tg.sendMessage(chatId, `${state}: ${escapeHtml(label)} (${fmt.code(job.id)})`);
+  await tg.sendMessage(key.chatId, `${state}: ${escapeHtml(label)} (${fmt.code(job.id)})`, undefined, key.threadId);
 }
 
 // ─── Scheduled job execution ─────────────────────────────────────────────────
 
 async function executeScheduledJob(job: ScheduledJob): Promise<void> {
-  const label = job.name ?? job.prompt.slice(0, 50);
-  await tg.sendMessage(job.chatId, `⏰ <b>Scheduled:</b> ${escapeHtml(label)}`);
+  // Jobs use isolated TopicKey so they never touch interactive sessions
+  const jobKey: TopicKey = { chatId: job.chatId, threadId: job.threadId, jobId: job.id };
 
-  // Ensure an active session in the job's cwd
-  let session = sessions.getActive(job.chatId);
+  const label = job.name ?? job.prompt.slice(0, 50);
+  await tg.sendMessage(job.chatId, `⏰ <b>Scheduled:</b> ${escapeHtml(label)}`, undefined, job.threadId);
+
+  // Ensure an active session for this job's isolated key
+  let session = sessions.getActive(jobKey);
 
   if (!session || session.cwd !== job.cwd) {
-    if (session) sessions.endActive(job.chatId);
+    if (session) sessions.endActive(jobKey);
 
     // Try to resume the specific session if set
     if (job.sessionId) {
       const hist = sessions.findByIdPrefix(job.chatId, job.sessionId);
       if (hist && hist.cwd === job.cwd) {
-        sessions.setActive(job.chatId, hist);
+        sessions.setActive(jobKey, hist);
         session = hist;
       }
     }
 
     // Otherwise create a fresh session
-    if (!sessions.getActive(job.chatId)) {
-      session = sessions.create(job.chatId, job.cwd, "pending", job.name);
+    if (!sessions.getActive(jobKey)) {
+      session = sessions.create(jobKey, job.cwd, "pending", job.name);
       await sessions.save();
     }
   }
@@ -1229,11 +1315,11 @@ async function executeScheduledJob(job: ScheduledJob): Promise<void> {
   await scheduler.save();
 
   // Execute via the existing fire-and-forget pattern
-  handlePrompt(job.chatId, job.prompt);
+  handlePrompt(jobKey, job.prompt);
 }
 
-async function handleHelp(chatId: number): Promise<void> {
-  const session = sessions.getActive(chatId);
+async function handleHelp(key: TopicKey): Promise<void> {
+  const session = sessions.getActive(key);
   const headerLines: string[] = [];
 
   if (session) {
@@ -1241,14 +1327,14 @@ async function handleHelp(chatId: number): Promise<void> {
     headerLines.push(
       `Active: ${fmt.code(id)}${session.name ? ` <b>${escapeHtml(session.name)}</b>` : ""} in ${fmt.code(session.cwd)}`,
     );
-    if (sessions.isProcessing(chatId)) headerLines.push("🟢 Currently running");
+    if (sessions.isProcessing(key)) headerLines.push("🟢 Currently running");
     headerLines.push("");
   } else {
     headerLines.push("<i>No active session — start one with /new</i>", "");
   }
 
   await tg.sendMessage(
-    chatId,
+    key.chatId,
     [
       "🤖 <b>Telegram Claude Orchestrator</b>",
       "",
@@ -1282,6 +1368,8 @@ async function handleHelp(chatId: number): Promise<void> {
       "",
       "Send any text to interact with Claude.",
     ].join("\n"),
+    undefined,
+    key.threadId,
   );
 }
 
@@ -1335,7 +1423,7 @@ const CC_COMMANDS = [
   { cmd: "pr-comments", desc: "Fetch PR comments" },
 ] as const;
 
-async function handleCcMenu(chatId: number): Promise<void> {
+async function handleCcMenu(key: TopicKey): Promise<void> {
   const lines = CC_COMMANDS.map((c) => `${fmt.code(`/cc ${c.cmd}`)} — ${escapeHtml(c.desc)}`);
 
   // Build 2-column button grid
@@ -1350,11 +1438,12 @@ async function handleCcMenu(chatId: number): Promise<void> {
   }
 
   await tg.sendMessageWithKeyboard(
-    chatId,
+    key.chatId,
     `🔧 <b>Claude Code Commands</b>\n\n${lines.join("\n")}\n\nTap or type ${fmt.code("/cc <command>")}:`,
     {
       inline_keyboard: buttons,
     },
+    key.threadId,
   );
 }
 
@@ -1366,13 +1455,13 @@ const MODE_LABELS: Record<PermissionMode, string> = {
   "auto-accept": "⚡ Auto-accept — runs tools without prompting",
 };
 
-async function handleMode(chatId: number, mode?: PermissionMode): Promise<void> {
-  const session = sessions.getActive(chatId);
+async function handleMode(key: TopicKey, mode?: PermissionMode): Promise<void> {
+  const session = sessions.getActive(key);
 
   if (!mode) {
     const current = session?.permissionMode ?? globalPermissionMode;
     await tg.sendMessageWithKeyboard(
-      chatId,
+      key.chatId,
       `Current mode: <b>${escapeHtml(current)}</b>\n\n${Object.values(MODE_LABELS)
         .map((l) => `• ${escapeHtml(l)}`)
         .join("\n")}`,
@@ -1385,6 +1474,7 @@ async function handleMode(chatId: number, mode?: PermissionMode): Promise<void> 
           ],
         ],
       },
+      key.threadId,
     );
     return;
   }
@@ -1394,14 +1484,19 @@ async function handleMode(chatId: number, mode?: PermissionMode): Promise<void> 
     await sessions.save();
   }
   globalPermissionMode = mode;
-  await tg.sendMessage(chatId, `✅ Mode: <b>${escapeHtml(mode)}</b>\n${escapeHtml(MODE_LABELS[mode])}`);
+  await tg.sendMessage(
+    key.chatId,
+    `✅ Mode: <b>${escapeHtml(mode)}</b>\n${escapeHtml(MODE_LABELS[mode])}`,
+    undefined,
+    key.threadId,
+  );
 }
 
 // ─── /dirs + /bookmark — directory management ─────────────────────────────────
 
-async function handleDirs(chatId: number): Promise<void> {
+async function handleDirs(key: TopicKey): Promise<void> {
   // Just show the same navigable picker as /new
-  await showNewPicker(chatId);
+  await showNewPicker(key);
 }
 
 async function handleBookmark(chatId: number, path?: string, name?: string): Promise<void> {
@@ -1448,56 +1543,56 @@ async function handleBookmark(chatId: number, path?: string, name?: string): Pro
 
 // ─── Claude subprocess management ─────────────────────────────────────────────
 
-const activeProcs = new Map<number, { kill: () => void }>();
+const activeProcs = new Map<TopicKeyString, { kill: () => void }>();
 
 async function handleClaudeCommand(
-  chatId: number,
+  key: TopicKey,
   slashCommand: string,
   args: string,
   replyToMessageId?: number,
 ): Promise<void> {
   const prompt = args ? `/${slashCommand} ${args}` : `/${slashCommand}`;
-  await handlePrompt(chatId, prompt, replyToMessageId);
+  await handlePrompt(key, prompt, replyToMessageId);
 }
 
-async function handlePrompt(chatId: number, text: string, replyToMessageId?: number): Promise<void> {
-  const session = sessions.getActive(chatId);
+async function handlePrompt(key: TopicKey, text: string, replyToMessageId?: number): Promise<void> {
+  const session = sessions.getActive(key);
   if (!session) {
     await tg.sendMessage(
-      chatId,
+      key.chatId,
       "No active session. Start one with:\n" +
         `${fmt.code("/new")} — in default directory\n` +
         `${fmt.code("/new /path/to/project")} — in a specific directory`,
+      undefined,
+      key.threadId,
     );
     return;
   }
 
-  if (sessions.isProcessing(chatId)) {
-    await tg.sendMessage(chatId, "⏳ Still processing. Please wait or /stop.");
+  if (sessions.isProcessing(key)) {
+    await tg.sendMessage(key.chatId, "⏳ Still processing. Please wait or /stop.", undefined, key.threadId);
     return;
   }
 
-  sessions.setProcessing(chatId, true);
+  sessions.setProcessing(key, true);
+
+  const keyStr = topicKeyStr(key);
 
   // Fire and forget — don't block the poll loop
-  runQuery(chatId, session, text, replyToMessageId)
+  runQuery(key, session, text, replyToMessageId)
     .catch((err) => {
       const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`❌  Query error (chat ${chatId}): ${msg}\n`);
-      tg.sendMessage(chatId, `❌ Error: ${msg}`).catch(() => undefined);
+      process.stderr.write(`❌  Query error (chat ${key.chatId}): ${msg}\n`);
+      tg.sendMessage(key.chatId, `❌ Error: ${msg}`, undefined, key.threadId).catch(() => undefined);
     })
     .finally(() => {
-      sessions.setProcessing(chatId, false);
-      activeProcs.delete(chatId);
+      sessions.setProcessing(key, false);
+      activeProcs.delete(keyStr);
     });
 }
 
-async function runQuery(
-  chatId: number,
-  session: SessionInfo,
-  prompt: string,
-  replyToMessageId?: number,
-): Promise<void> {
+async function runQuery(key: TopicKey, session: SessionInfo, prompt: string, replyToMessageId?: number): Promise<void> {
+  const chatId = key.chatId;
   const isResume = session.sessionId !== "pending";
   const model = session.model ?? globalModel;
 
@@ -1517,17 +1612,21 @@ async function runQuery(
 
   // Write temp MCP config: project servers + permission relay sidecar.
   // Relay is spread last so a project can't shadow it.
-  const mcpConfigPath = `/tmp/telegram-relay-${chatId}-${process.pid}.json`;
+  const keyStr = topicKeyStr(key);
+  const mcpConfigPath = `/tmp/telegram-relay-${chatId}-${process.pid}-${key.threadId ?? 0}.json`;
+  const relayEnv: Record<string, string> = {
+    RELAY_HTTP_PORT: String(relay.port),
+    RELAY_CHAT_ID: String(chatId),
+  };
+  if (key.threadId != null) relayEnv.RELAY_THREAD_ID = String(key.threadId);
+
   const mcpConfig = {
     mcpServers: {
       ...projectMcpServers,
       telegram_relay: {
         command: "bun",
         args: ["run", RELAY_SCRIPT],
-        env: {
-          RELAY_HTTP_PORT: String(relay.port),
-          RELAY_CHAT_ID: String(chatId),
-        },
+        env: relayEnv,
       },
       telegram_scheduler: {
         command: "bun",
@@ -1593,26 +1692,26 @@ async function runQuery(
     env: { ...process.env, PATH: mergedPath },
   });
 
-  activeProcs.set(chatId, proc);
+  activeProcs.set(keyStr, proc);
 
   // Typing keepalive
   const typingTimer = setInterval(() => {
-    tg.sendChatAction(chatId).catch(() => undefined);
+    tg.sendChatAction(chatId, "typing", key.threadId).catch(() => undefined);
   }, TYPING_INTERVAL_MS);
 
   // Read stderr in background
   readStderr(proc.stderr, session.cwd);
 
   // Stream output to Telegram — thread under the user's message
-  const renderer = new StreamingRenderer(tg, chatId);
+  const renderer = new StreamingRenderer(tg, chatId, key.threadId);
   await renderer.start(replyToMessageId);
 
   try {
-    const result = await processNdjsonStream(proc.stdout, renderer, chatId);
+    const result = await processNdjsonStream(proc.stdout, renderer, key);
 
     // Update session with real ID and title
     if (result.sessionId) {
-      sessions.updateSessionId(chatId, result.sessionId);
+      sessions.updateSessionId(key, result.sessionId);
       session.lastActiveAt = Date.now();
     }
     if (result.title && !session.name) {
@@ -1621,7 +1720,7 @@ async function runQuery(
 
     // Accumulate cost
     if (result.totalCost || result.numTurns) {
-      sessions.addCost(chatId, result.totalCost ?? 0, result.numTurns ?? 0);
+      sessions.addCost(key, result.totalCost ?? 0, result.numTurns ?? 0);
     }
     await sessions.save();
 
@@ -1661,7 +1760,7 @@ interface QueryResult {
 async function processNdjsonStream(
   stdout: ReadableStream<Uint8Array>,
   renderer: StreamingRenderer,
-  chatId: number,
+  key: TopicKey,
 ): Promise<QueryResult> {
   const reader = stdout.getReader();
   const decoder = new TextDecoder();
@@ -1726,7 +1825,7 @@ async function processNdjsonStream(
             }
             if (block.type === "tool_use" && block.name) {
               if (block.name === "AskUserQuestion") {
-                await sendQuestionPrompt(chatId, block.input);
+                await sendQuestionPrompt(key, block.input);
               } else {
                 await renderer.showToolCall(block.name, block.input);
               }
@@ -1795,7 +1894,7 @@ async function processNdjsonStream(
 }
 
 /** Send a question prompt to Telegram when AskUserQuestion is detected in stream. */
-async function sendQuestionPrompt(chatId: number, input: unknown): Promise<void> {
+async function sendQuestionPrompt(key: TopicKey, input: unknown): Promise<void> {
   const questions = (
     input as { questions?: Array<{ question: string; options?: Array<{ label: string; description?: string }> }> }
   )?.questions;
@@ -1815,7 +1914,7 @@ async function sendQuestionPrompt(chatId: number, input: unknown): Promise<void>
     text += "\n\n<i>Type your answer.</i>";
   }
 
-  await tg.sendMessage(chatId, text).catch(() => undefined);
+  await tg.sendMessage(key.chatId, text, undefined, key.threadId).catch(() => undefined);
 }
 
 /** Read stderr from claude subprocess and log it. */
@@ -1855,8 +1954,10 @@ const schedulerTimer = setInterval(async () => {
   try {
     const dueJobs = scheduler.getDueJobs(Date.now());
     for (const job of dueJobs) {
-      if (sessions.isProcessing(job.chatId)) {
-        process.stderr.write(`⏰  Skipping scheduled job ${job.id} — chat ${job.chatId} is busy\n`);
+      // Check if THIS job's isolated session is already running
+      const jobKey: TopicKey = { chatId: job.chatId, threadId: job.threadId, jobId: job.id };
+      if (sessions.isProcessing(jobKey)) {
+        process.stderr.write(`⏰  Skipping scheduled job ${job.id} — still running\n`);
         continue;
       }
       await executeScheduledJob(job);

@@ -22,10 +22,11 @@ export class StreamingRenderer {
   constructor(
     private readonly tg: TelegramClient,
     private readonly chatId: number,
+    private readonly threadId?: number,
   ) {}
 
   async start(replyToMessageId?: number): Promise<void> {
-    const msg = await this.tg.sendMessage(this.chatId, "⚙️ Working…", replyToMessageId);
+    const msg = await this.tg.sendMessage(this.chatId, "⚙️ Working…", replyToMessageId, this.threadId);
     this.statusMessageId = msg.message_id;
   }
 
@@ -33,7 +34,7 @@ export class StreamingRenderer {
     const trimmed = text.trim();
     if (!trimmed) return;
     this.lastToolMessageId = null; // new text block clears tool context
-    await sendLongMessage(this.tg, this.chatId, markdownToTelegramHtml(trimmed));
+    await sendLongMessage(this.tg, this.chatId, markdownToTelegramHtml(trimmed), this.threadId);
   }
 
   async showToolCall(toolName: string, input: unknown): Promise<void> {
@@ -46,7 +47,7 @@ export class StreamingRenderer {
 
     const toolMsg = formatToolMessage(toolName, input);
     try {
-      const sent = await this.tg.sendMessage(this.chatId, toolMsg);
+      const sent = await this.tg.sendMessage(this.chatId, toolMsg, undefined, this.threadId);
       this.lastToolMessageId = sent.message_id;
       this.lastToolText = toolMsg;
     } catch {
@@ -117,7 +118,7 @@ export class StreamingRenderer {
   private async sendFullOutput(content: string): Promise<void> {
     try {
       const data = new TextEncoder().encode(content);
-      await this.tg.sendDocument(this.chatId, data, "output.txt", "Full tool output");
+      await this.tg.sendDocument(this.chatId, data, "output.txt", "Full tool output", this.threadId);
     } catch {
       /* ignore — preview is still shown inline */
     }
@@ -221,9 +222,14 @@ function sleep(ms: number): Promise<void> {
 }
 
 /** Split text into ≤4096 char chunks at line/space boundaries and send sequentially. */
-export async function sendLongMessage(tg: TelegramClient, chatId: number, text: string): Promise<void> {
+export async function sendLongMessage(
+  tg: TelegramClient,
+  chatId: number,
+  text: string,
+  threadId?: number,
+): Promise<void> {
   if (text.length <= MAX_TG_LENGTH) {
-    await tg.sendMessage(chatId, text);
+    await tg.sendMessage(chatId, text, undefined, threadId);
     return;
   }
 
@@ -249,7 +255,7 @@ export async function sendLongMessage(tg: TelegramClient, chatId: number, text: 
   }
 
   for (const chunk of chunks) {
-    await tg.sendMessage(chatId, chunk);
+    await tg.sendMessage(chatId, chunk, undefined, threadId);
     await sleep(200);
   }
 }

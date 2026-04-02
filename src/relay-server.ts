@@ -1,6 +1,7 @@
 import { RELAY_PROMPT_TIMEOUT_MS } from "./config.js";
 import type { ScheduleManager } from "./scheduler.js";
-import type { RelayPromptRequest, RelayPromptResponse } from "./types.js";
+import type { RelayPromptRequest, RelayPromptResponse, TopicKey, TopicKeyString } from "./types.js";
+import { topicKeyStr } from "./types.js";
 
 interface PendingPrompt {
   resolve: (response: RelayPromptResponse) => void;
@@ -12,11 +13,11 @@ interface PendingPrompt {
 export interface RelayServer {
   port: number;
   /** Resolve a pending permission prompt (called when user responds via Telegram). */
-  resolvePrompt: (chatId: number, response: RelayPromptResponse) => boolean;
-  /** Check if a permission prompt is pending for a chat. */
-  hasPending: (chatId: number) => boolean;
+  resolvePrompt: (key: TopicKey, response: RelayPromptResponse) => boolean;
+  /** Check if a permission prompt is pending for a topic. */
+  hasPending: (key: TopicKey) => boolean;
   /** Get the pending request details (for display). */
-  getPending: (chatId: number) => RelayPromptRequest | undefined;
+  getPending: (key: TopicKey) => RelayPromptRequest | undefined;
   shutdown: () => void;
 }
 
@@ -31,7 +32,7 @@ export async function startRelayServer(
   onPrompt?: (request: RelayPromptRequest) => Promise<void>,
   scheduler?: ScheduleManager,
 ): Promise<RelayServer> {
-  const pending = new Map<number, PendingPrompt>();
+  const pending = new Map<TopicKeyString, PendingPrompt>();
 
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -51,10 +52,11 @@ export async function startRelayServer(
           return Response.json({ error: "invalid json" }, { status: 400 });
         }
 
-        const { chatId } = body;
+        const key: TopicKey = { chatId: body.chatId, threadId: body.threadId };
+        const keyStr = topicKeyStr(key);
 
-        // If there's already a pending prompt for this chat, auto-deny the new one
-        if (pending.has(chatId)) {
+        // If there's already a pending prompt for this topic, auto-deny the new one
+        if (pending.has(keyStr)) {
           return Response.json({
             behavior: "deny",
             message: "Another permission prompt is already pending",
@@ -64,14 +66,14 @@ export async function startRelayServer(
         // Create a promise that will be resolved when the user responds
         const responsePromise = new Promise<RelayPromptResponse>((resolve, reject) => {
           const timer = setTimeout(() => {
-            pending.delete(chatId);
+            pending.delete(keyStr);
             resolve({
               behavior: "deny",
               message: "Permission prompt timed out (2 minutes)",
             });
           }, RELAY_PROMPT_TIMEOUT_MS);
 
-          pending.set(chatId, { resolve, reject, timer, request: body });
+          pending.set(keyStr, { resolve, reject, timer, request: body });
         });
 
         // Notify the orchestrator to send the Telegram message with buttons
@@ -131,28 +133,29 @@ export async function startRelayServer(
   return {
     port,
 
-    resolvePrompt(chatId: number, response: RelayPromptResponse): boolean {
-      const entry = pending.get(chatId);
+    resolvePrompt(key: TopicKey, response: RelayPromptResponse): boolean {
+      const keyStr = topicKeyStr(key);
+      const entry = pending.get(keyStr);
       if (!entry) return false;
       clearTimeout(entry.timer);
-      pending.delete(chatId);
+      pending.delete(keyStr);
       entry.resolve(response);
       return true;
     },
 
-    hasPending(chatId: number): boolean {
-      return pending.has(chatId);
+    hasPending(key: TopicKey): boolean {
+      return pending.has(topicKeyStr(key));
     },
 
-    getPending(chatId: number): RelayPromptRequest | undefined {
-      return pending.get(chatId)?.request;
+    getPending(key: TopicKey): RelayPromptRequest | undefined {
+      return pending.get(topicKeyStr(key))?.request;
     },
 
     shutdown() {
-      for (const [chatId, entry] of pending) {
+      for (const [keyStr, entry] of pending) {
         clearTimeout(entry.timer);
         entry.resolve({ behavior: "deny", message: "Server shutting down" });
-        pending.delete(chatId);
+        pending.delete(keyStr);
       }
       server.stop();
     },

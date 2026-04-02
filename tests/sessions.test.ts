@@ -3,14 +3,20 @@ import { join } from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { SessionManager } from "../src/sessions.js";
+import type { TopicKey } from "../src/types.js";
+
+/** Helper to create a TopicKey from a chatId (flat-chat mode). */
+function k(chatId: number, threadId?: number, jobId?: string): TopicKey {
+  return { chatId, threadId, jobId };
+}
 
 describe("SessionManager", () => {
   // ─── In-memory operations ──────────────────────────────────────────────
 
   test("create sets session as active", () => {
     const mgr = new SessionManager("/tmp/unused.json");
-    const s = mgr.create(100, "/tmp/proj", "sess-aaa", "frontend");
-    expect(mgr.getActive(100)).toBe(s);
+    const s = mgr.create(k(100), "/tmp/proj", "sess-aaa", "frontend");
+    expect(mgr.getActive(k(100))).toBe(s);
     expect(s.sessionId).toBe("sess-aaa");
     expect(s.cwd).toBe("/tmp/proj");
     expect(s.name).toBe("frontend");
@@ -20,49 +26,49 @@ describe("SessionManager", () => {
 
   test("getActive returns undefined for no session", () => {
     const mgr = new SessionManager("/tmp/unused.json");
-    expect(mgr.getActive(999)).toBeUndefined();
+    expect(mgr.getActive(k(999))).toBeUndefined();
   });
 
   test("endActive removes and returns session", () => {
     const mgr = new SessionManager("/tmp/unused.json");
-    mgr.create(100, "/tmp", "sess-1");
-    const ended = mgr.endActive(100);
+    mgr.create(k(100), "/tmp", "sess-1");
+    const ended = mgr.endActive(k(100));
     expect(ended?.sessionId).toBe("sess-1");
-    expect(mgr.getActive(100)).toBeUndefined();
+    expect(mgr.getActive(k(100))).toBeUndefined();
   });
 
   test("endActive returns undefined if none active", () => {
     const mgr = new SessionManager("/tmp/unused.json");
-    expect(mgr.endActive(100)).toBeUndefined();
+    expect(mgr.endActive(k(100))).toBeUndefined();
   });
 
   test("setActive promotes a session", () => {
     const mgr = new SessionManager("/tmp/unused.json");
-    const s = mgr.create(100, "/tmp", "sess-1", "old");
-    mgr.endActive(100);
-    mgr.setActive(100, s);
-    expect(mgr.getActive(100)).toBe(s);
+    const s = mgr.create(k(100), "/tmp", "sess-1", "old");
+    mgr.endActive(k(100));
+    mgr.setActive(k(100), s);
+    expect(mgr.getActive(k(100))).toBe(s);
   });
 
   test("updateSessionId changes the ID", () => {
     const mgr = new SessionManager("/tmp/unused.json");
-    mgr.create(100, "/tmp", "pending");
-    mgr.updateSessionId(100, "real-uuid-123");
-    expect(mgr.getActive(100)?.sessionId).toBe("real-uuid-123");
+    mgr.create(k(100), "/tmp", "pending");
+    mgr.updateSessionId(k(100), "real-uuid-123");
+    expect(mgr.getActive(k(100))?.sessionId).toBe("real-uuid-123");
   });
 
   test("updateSessionId is no-op without active session", () => {
     const mgr = new SessionManager("/tmp/unused.json");
-    mgr.updateSessionId(100, "whatever"); // should not throw
+    mgr.updateSessionId(k(100), "whatever"); // should not throw
   });
 
   // ─── Listing ───────────────────────────────────────────────────────────
 
   test("listForChat filters by chatId and excludes pending", () => {
     const mgr = new SessionManager("/tmp/unused.json");
-    mgr.create(100, "/a", "sess-1", "a");
-    mgr.create(100, "/b", "pending", "b");
-    mgr.create(200, "/c", "sess-2", "c");
+    mgr.create(k(100), "/a", "sess-1", "a");
+    mgr.create(k(100), "/b", "pending", "b");
+    mgr.create(k(200), "/c", "sess-2", "c");
 
     const list = mgr.listForChat(100);
     expect(list).toHaveLength(1);
@@ -71,11 +77,11 @@ describe("SessionManager", () => {
 
   test("listForChat sorts by lastActiveAt descending", () => {
     const mgr = new SessionManager("/tmp/unused.json");
-    const s1 = mgr.create(100, "/a", "sess-1");
+    const s1 = mgr.create(k(100), "/a", "sess-1");
     s1.lastActiveAt = 1000;
-    const s2 = mgr.create(100, "/b", "sess-2");
+    const s2 = mgr.create(k(100), "/b", "sess-2");
     s2.lastActiveAt = 3000;
-    const s3 = mgr.create(100, "/c", "sess-3");
+    const s3 = mgr.create(k(100), "/c", "sess-3");
     s3.lastActiveAt = 2000;
 
     const list = mgr.listForChat(100);
@@ -84,8 +90,8 @@ describe("SessionManager", () => {
 
   test("findByName scoped to chatId", () => {
     const mgr = new SessionManager("/tmp/unused.json");
-    mgr.create(100, "/a", "sess-1", "frontend");
-    mgr.create(200, "/b", "sess-2", "frontend");
+    mgr.create(k(100), "/a", "sess-1", "frontend");
+    mgr.create(k(200), "/b", "sess-2", "frontend");
 
     const found = mgr.findByName(100, "frontend");
     expect(found?.sessionId).toBe("sess-1");
@@ -93,7 +99,7 @@ describe("SessionManager", () => {
 
   test("findByIdPrefix", () => {
     const mgr = new SessionManager("/tmp/unused.json");
-    mgr.create(100, "/a", "sess-abc-123");
+    mgr.create(k(100), "/a", "sess-abc-123");
     expect(mgr.findByIdPrefix(100, "sess-abc")?.sessionId).toBe("sess-abc-123");
     expect(mgr.findByIdPrefix(100, "nope")).toBeUndefined();
   });
@@ -102,33 +108,107 @@ describe("SessionManager", () => {
 
   test("addCost accumulates", () => {
     const mgr = new SessionManager("/tmp/unused.json");
-    mgr.create(100, "/tmp", "sess-1");
-    mgr.addCost(100, 0.005, 3);
-    mgr.addCost(100, 0.002, 2);
+    mgr.create(k(100), "/tmp", "sess-1");
+    mgr.addCost(k(100), 0.005, 3);
+    mgr.addCost(k(100), 0.002, 2);
 
-    const s = mgr.getActive(100);
+    const s = mgr.getActive(k(100));
     expect(s?.totalCost).toBeCloseTo(0.007);
     expect(s?.totalTurns).toBe(5);
   });
 
   test("addCost is no-op without active session", () => {
     const mgr = new SessionManager("/tmp/unused.json");
-    mgr.addCost(100, 1.0, 10); // should not throw
+    mgr.addCost(k(100), 1.0, 10); // should not throw
   });
 
   // ─── Processing flag ───────────────────────────────────────────────────
 
   test("isProcessing defaults to false", () => {
     const mgr = new SessionManager("/tmp/unused.json");
-    expect(mgr.isProcessing(100)).toBe(false);
+    expect(mgr.isProcessing(k(100))).toBe(false);
   });
 
   test("setProcessing toggles the flag", () => {
     const mgr = new SessionManager("/tmp/unused.json");
-    mgr.setProcessing(100, true);
-    expect(mgr.isProcessing(100)).toBe(true);
-    mgr.setProcessing(100, false);
-    expect(mgr.isProcessing(100)).toBe(false);
+    mgr.setProcessing(k(100), true);
+    expect(mgr.isProcessing(k(100))).toBe(true);
+    mgr.setProcessing(k(100), false);
+    expect(mgr.isProcessing(k(100))).toBe(false);
+  });
+
+  // ─── TopicKey isolation ────────────────────────────────────────────────
+
+  test("different TopicKeys have independent sessions", () => {
+    const mgr = new SessionManager("/tmp/unused.json");
+    const interactive = mgr.create(k(100), "/proj", "sess-interactive");
+    const job = mgr.create(k(100, undefined, "job-abc"), "/proj", "sess-job");
+
+    expect(mgr.getActive(k(100))).toBe(interactive);
+    expect(mgr.getActive(k(100, undefined, "job-abc"))).toBe(job);
+    expect(interactive.sessionId).not.toBe(job.sessionId);
+  });
+
+  test("different TopicKeys have independent processing flags", () => {
+    const mgr = new SessionManager("/tmp/unused.json");
+    mgr.setProcessing(k(100), true);
+    mgr.setProcessing(k(100, undefined, "job-abc"), true);
+
+    expect(mgr.isProcessing(k(100))).toBe(true);
+    expect(mgr.isProcessing(k(100, undefined, "job-abc"))).toBe(true);
+    expect(mgr.isProcessing(k(100, 42))).toBe(false);
+
+    mgr.setProcessing(k(100), false);
+    expect(mgr.isProcessing(k(100))).toBe(false);
+    expect(mgr.isProcessing(k(100, undefined, "job-abc"))).toBe(true);
+  });
+
+  test("getActiveForChat returns all active sessions for a chat", () => {
+    const mgr = new SessionManager("/tmp/unused.json");
+    mgr.create(k(100), "/a", "sess-1");
+    mgr.create(k(100, undefined, "job-1"), "/b", "sess-2");
+    mgr.create(k(200), "/c", "sess-3");
+
+    const results = mgr.getActiveForChat(100);
+    expect(results).toHaveLength(2);
+    expect(results.map((s) => s.sessionId).sort()).toEqual(["sess-1", "sess-2"]);
+  });
+
+  test("getActiveByThread finds session by threadId", () => {
+    const mgr = new SessionManager("/tmp/unused.json");
+    mgr.create(k(100, 42), "/a", "sess-1");
+    mgr.create(k(100, 99), "/b", "sess-2");
+
+    expect(mgr.getActiveByThread(100, 42)?.sessionId).toBe("sess-1");
+    expect(mgr.getActiveByThread(100, 99)?.sessionId).toBe("sess-2");
+    expect(mgr.getActiveByThread(100, 1)).toBeUndefined();
+  });
+
+  test("isAnyChatProcessing checks across all topics", () => {
+    const mgr = new SessionManager("/tmp/unused.json");
+    expect(mgr.isAnyChatProcessing(100)).toBe(false);
+
+    mgr.setProcessing(k(100, undefined, "job-1"), true);
+    expect(mgr.isAnyChatProcessing(100)).toBe(true);
+    expect(mgr.isAnyChatProcessing(200)).toBe(false);
+
+    mgr.setProcessing(k(100, undefined, "job-1"), false);
+    expect(mgr.isAnyChatProcessing(100)).toBe(false);
+  });
+
+  test("threadId stored on session via create", () => {
+    const mgr = new SessionManager("/tmp/unused.json");
+    const s = mgr.create(k(100, 42), "/a", "sess-1");
+    expect(s.threadId).toBe(42);
+  });
+
+  test("setActive updates threadId", () => {
+    const mgr = new SessionManager("/tmp/unused.json");
+    const s = mgr.create(k(100), "/a", "sess-1");
+    expect(s.threadId).toBeUndefined();
+    mgr.endActive(k(100));
+    mgr.setActive(k(100, 42), s);
+    expect(s.threadId).toBe(42);
   });
 
   // ─── Persistence ───────────────────────────────────────────────────────
@@ -147,8 +227,8 @@ describe("SessionManager", () => {
     test("round-trips session history", async () => {
       const path = join(tmpDir, "sessions.json");
       const mgr1 = new SessionManager(path);
-      mgr1.create(100, "/proj-a", "sess-1", "frontend");
-      mgr1.create(100, "/proj-b", "sess-2");
+      mgr1.create(k(100), "/proj-a", "sess-1", "frontend");
+      mgr1.create(k(100), "/proj-b", "sess-2");
       await mgr1.save();
 
       const mgr2 = new SessionManager(path);
