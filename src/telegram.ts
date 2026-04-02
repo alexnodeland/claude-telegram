@@ -115,13 +115,20 @@ export class TelegramClient {
     return json.result;
   }
 
-  async editMessageText(chatId: number, messageId: number, text: string): Promise<void> {
-    await this.call("editMessageText", {
+  async editMessageText(
+    chatId: number,
+    messageId: number,
+    text: string,
+    keyboard?: TelegramInlineKeyboardMarkup,
+  ): Promise<void> {
+    const body: Record<string, unknown> = {
       chat_id: chatId,
       message_id: messageId,
       text,
       parse_mode: "HTML",
-    });
+    };
+    if (keyboard) body.reply_markup = keyboard;
+    await this.call("editMessageText", body);
   }
 
   async pinChatMessage(chatId: number, messageId: number, disableNotification = true): Promise<void> {

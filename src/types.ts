@@ -80,6 +80,10 @@ export interface TelegramMessage {
   message_thread_id?: number;
   /** True when the message is a topic message (not the General topic). */
   is_topic_message?: boolean;
+  /** Service message: forum topic was closed. */
+  forum_topic_closed?: Record<string, never>;
+  /** Service message: forum topic was reopened. */
+  forum_topic_reopened?: Record<string, never>;
 }
 
 export interface TelegramCallbackQuery {

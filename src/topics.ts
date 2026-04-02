@@ -7,6 +7,7 @@ const MAX_TOPIC_NAME_LENGTH = 128;
 export const TOPIC_COLORS = {
   SESSION: 7322096, // blue
   JOB: 9367192, // green
+  ACTIVITY: 16766590, // yellow
 } as const;
 
 function truncate(name: string, maxLen: number): string {
@@ -79,6 +80,29 @@ export class TopicManager {
 
   async reopenTopic(chatId: number, threadId: number): Promise<void> {
     await this.tg.reopenForumTopic(chatId, threadId);
+  }
+
+  // ─── Activity topic ────────────────────────────────────────────────────
+
+  /** Cache: chatId → activity topic threadId */
+  private activityTopicCache = new Map<number, number>();
+
+  /** Get or create the persistent "Activity" topic for notifications. */
+  async getActivityTopic(chatId: number): Promise<number | null> {
+    const cached = this.activityTopicCache.get(chatId);
+    if (cached != null) return cached;
+    try {
+      const topic = await this.tg.createForumTopic(chatId, "📊 Activity", TOPIC_COLORS.ACTIVITY);
+      this.activityTopicCache.set(chatId, topic.message_thread_id);
+      return topic.message_thread_id;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Set the activity topic ID (e.g. loaded from persistence). */
+  setActivityTopic(chatId: number, threadId: number): void {
+    this.activityTopicCache.set(chatId, threadId);
   }
 
   // ─── Thread-to-session routing ────────────────────────────────────────

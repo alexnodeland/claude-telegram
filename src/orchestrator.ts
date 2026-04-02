@@ -101,6 +101,157 @@ const sessions = new SessionManager(join(config.dataDir, "sessions.json"));
 await sessions.load();
 topics.reconcile(sessions.getAllActive());
 
+// ─── Activity topic persistence ──────────────────────────────────────────────
+
+const activityTopicPath = join(config.dataDir, "activity-topics.json");
+
+async function loadActivityTopics(): Promise<void> {
+  try {
+    const data = JSON.parse(await readFile(activityTopicPath, "utf8")) as Record<string, number>;
+    for (const [chatId, threadId] of Object.entries(data)) {
+      topics.setActivityTopic(Number(chatId), threadId);
+    }
+  } catch {
+    /* no file yet */
+  }
+}
+
+async function saveActivityTopic(chatId: number, threadId: number): Promise<void> {
+  let data: Record<string, number> = {};
+  try {
+    data = JSON.parse(await readFile(activityTopicPath, "utf8")) as Record<string, number>;
+  } catch {
+    /* fresh */
+  }
+  data[String(chatId)] = threadId;
+  await writeFile(activityTopicPath, JSON.stringify(data, null, 2));
+}
+
+await loadActivityTopics();
+
+// ─── General topic pinned control panel ──────────────────────────────────────
+
+const generalPinPath = join(config.dataDir, "general-pins.json");
+const generalPinIds = new Map<number, number>(); // chatId → messageId
+
+async function loadGeneralPins(): Promise<void> {
+  try {
+    const data = JSON.parse(await readFile(generalPinPath, "utf8")) as Record<string, number>;
+    for (const [chatId, msgId] of Object.entries(data)) {
+      generalPinIds.set(Number(chatId), msgId);
+    }
+  } catch {
+    /* no file yet */
+  }
+}
+
+async function saveGeneralPin(chatId: number, messageId: number): Promise<void> {
+  generalPinIds.set(chatId, messageId);
+  const data = Object.fromEntries(generalPinIds);
+  await writeFile(generalPinPath, JSON.stringify(data, null, 2));
+}
+
+/** Build the live cockpit text from current state. */
+function buildCockpitText(chatId: number): string {
+  // Filter to interactive sessions only (exclude job-isolated sessions)
+  const activeSessions = sessions.getActiveForChat(chatId).filter((s) => {
+    // Check if this session is keyed with a jobId by looking for ":job:" in any active key
+    // Interactive sessions have keys like "chatId" or "chatId:threadId"
+    const key = { chatId: s.chatId, threadId: s.threadId };
+    return sessions.getActive(key) === s;
+  });
+  const jobs = scheduler.list(chatId);
+  const enabledJobs = jobs.filter((j) => j.enabled);
+  const totalCost = activeSessions.reduce((sum, s) => sum + (s.totalCost ?? 0), 0);
+
+  const lines: string[] = ["🤖 <b>Claude Control Panel</b>", ""];
+
+  // Active sessions
+  if (activeSessions.length > 0) {
+    lines.push(`<b>Sessions</b> (${activeSessions.length}/${MAX_SESSIONS_PER_CHAT})`);
+    for (const s of activeSessions.slice(0, 5)) {
+      const label = s.name ?? s.title ?? s.sessionId.slice(0, 8);
+      const isRunning = sessions.isProcessing({ chatId: s.chatId, threadId: s.threadId });
+      const state = isRunning ? "🟢" : "⚪";
+      const cost = (s.totalCost ?? 0) > 0 ? ` · $${(s.totalCost ?? 0).toFixed(3)}` : "";
+      let line = `${state} <b>${escapeHtml(label)}</b>${cost}`;
+      if (s.threadId) {
+        const link = topics.getTopicLink(chatId, s.threadId);
+        if (link) line += ` · <a href="${link}">open</a>`;
+      }
+      lines.push(line);
+    }
+  } else {
+    lines.push("<i>No active sessions</i>");
+  }
+
+  lines.push("");
+
+  // Scheduled jobs
+  if (enabledJobs.length > 0) {
+    lines.push(`<b>Jobs</b> (${enabledJobs.length} active)`);
+    const next = enabledJobs.find((j) => j.nextRunAt);
+    if (next) {
+      const label = next.name ?? next.prompt.slice(0, 25);
+      const when = next.nextRunAt ? new Date(next.nextRunAt).toLocaleTimeString() : "—";
+      lines.push(`⏭ Next: <b>${escapeHtml(label)}</b> at ${when}`);
+    }
+  } else {
+    lines.push("<i>No scheduled jobs</i>");
+  }
+
+  if (totalCost > 0) {
+    lines.push("", `💰 Total: $${totalCost.toFixed(4)}`);
+  }
+
+  return lines.join("\n");
+}
+
+const COCKPIT_KEYBOARD = {
+  inline_keyboard: [
+    [
+      { text: "🆕 New session", callback_data: "quick:new" },
+      { text: "📋 Sessions", callback_data: "quick:sessions" },
+    ],
+    [
+      { text: "⏰ Jobs", callback_data: "quick:jobs" },
+      { text: "📂 Dirs", callback_data: "quick:dirs" },
+    ],
+    [{ text: "❓ Help", callback_data: "quick:help" }],
+  ],
+};
+
+/** Ensure the General topic has a pinned cockpit. Creates or updates. */
+async function ensureGeneralPin(chatId: number): Promise<void> {
+  const isForum = await topics.isForum(chatId);
+  if (!isForum) return;
+
+  const text = buildCockpitText(chatId);
+  const existing = generalPinIds.get(chatId);
+  if (existing) {
+    await tg.editMessageText(chatId, existing, text, COCKPIT_KEYBOARD).catch(() => {
+      // Message was deleted — recreate
+      generalPinIds.delete(chatId);
+    });
+    if (generalPinIds.has(chatId)) return;
+  }
+
+  try {
+    const msg = await tg.sendMessageWithKeyboard(chatId, text, COCKPIT_KEYBOARD);
+    await tg.pinChatMessage(chatId, msg.message_id).catch(() => undefined);
+    await saveGeneralPin(chatId, msg.message_id);
+  } catch (err) {
+    process.stderr.write(`⚠️  Failed to pin cockpit: ${err}\n`);
+  }
+}
+
+/** Refresh the cockpit after state changes (best-effort, fire-and-forget). */
+function refreshCockpit(chatId: number): void {
+  ensureGeneralPin(chatId).catch(() => undefined);
+}
+
+await loadGeneralPins();
+
 // ─── Directory bookmarks ──────────────────────────────────────────────────────
 
 const bookmarksPath = join(config.dataDir, "bookmarks.json");
@@ -224,7 +375,7 @@ async function showDirBrowser(key: TopicKey, dirPath: string, page = 0): Promise
       ? `${header}${pageLabel}\n\n${pageItems.map((c) => `  📁 ${escapeHtml(c)}`).join("\n")}`
       : `${header}\n\n<i>No subdirectories</i>`;
 
-  await tg.sendMessageWithKeyboard(key.chatId, text, { inline_keyboard: buttons }, key.threadId);
+  await sendGeneralKeyboard(key.chatId, text, { inline_keyboard: buttons }, key.threadId);
 }
 
 /** Show the initial /new picker with bookmarks, recent dirs, and home. */
@@ -268,7 +419,7 @@ async function showNewPicker(key: TopicKey): Promise<void> {
       ? shortcuts.map((s) => `${s.text} → ${fmt.code(s.path)}`).join("\n")
       : "<i>No bookmarks or recent sessions</i>";
 
-  await tg.sendMessageWithKeyboard(
+  await sendGeneralKeyboard(
     key.chatId,
     `🆕 <b>New session — choose directory:</b>\n\n${lines}\n\nTap a shortcut or browse:`,
     { inline_keyboard: buttons },
@@ -449,11 +600,56 @@ async function pinSessionStatus(session: SessionInfo): Promise<void> {
   }
 }
 
-/** Send a notification to the General topic (no-op for non-forum chats). */
+/** Send a notification to the Activity topic (no-op for non-forum chats). */
 async function notifyGeneral(chatId: number, text: string): Promise<void> {
   const isForum = await topics.isForum(chatId);
   if (!isForum) return;
-  await tg.sendMessage(chatId, text).catch(() => undefined);
+  const threadId = await topics.getActivityTopic(chatId);
+  if (threadId != null) {
+    // Ensure topic is open
+    try {
+      await topics.reopenTopic(chatId, threadId);
+    } catch {
+      /* already open */
+    }
+  }
+  if (threadId == null) return;
+  await saveActivityTopic(chatId, threadId);
+  await tg.sendMessage(chatId, text, undefined, threadId).catch(() => undefined);
+}
+
+/** Last bot message in General topic per chat (for ephemeral cleanup). */
+const lastGeneralMessage = new Map<number, number>();
+
+/** Send an ephemeral message to General topic — deletes the previous one. In non-forum chats, sends normally. */
+async function sendGeneralMessage(chatId: number, text: string, threadId?: number): Promise<void> {
+  const isForum = await topics.isForum(chatId);
+  if (isForum && threadId == null) {
+    const prev = lastGeneralMessage.get(chatId);
+    if (prev) tg.deleteMessage(chatId, prev);
+    const msg = await tg.sendMessage(chatId, text);
+    lastGeneralMessage.set(chatId, msg.message_id);
+  } else {
+    await tg.sendMessage(chatId, text, undefined, threadId);
+  }
+}
+
+/** Send an ephemeral message with keyboard to General topic — deletes the previous one. */
+async function sendGeneralKeyboard(
+  chatId: number,
+  text: string,
+  keyboard: import("./types.js").TelegramInlineKeyboardMarkup,
+  threadId?: number,
+): Promise<void> {
+  const isForum = await topics.isForum(chatId);
+  if (isForum && threadId == null) {
+    const prev = lastGeneralMessage.get(chatId);
+    if (prev) tg.deleteMessage(chatId, prev);
+    const msg = await tg.sendMessageWithKeyboard(chatId, text, keyboard, undefined);
+    lastGeneralMessage.set(chatId, msg.message_id);
+  } else {
+    await tg.sendMessageWithKeyboard(chatId, text, keyboard, threadId);
+  }
 }
 
 /** Quick-start inline keyboard for new/resumed sessions in forum topics. */
@@ -515,6 +711,29 @@ async function downloadAttachment(
 let lastUpdateId = 0;
 
 async function handleMessage(message: TelegramMessage): Promise<void> {
+  // Handle forum topic closed — auto-stop the session
+  if (message.forum_topic_closed && message.message_thread_id) {
+    const chatId = message.chat.id;
+    const threadId = message.message_thread_id;
+    const key: TopicKey = { chatId, threadId };
+    const keyStr = topicKeyStr(key);
+    const proc = activeProcs.get(keyStr);
+    if (proc) {
+      proc.kill();
+      activeProcs.delete(keyStr);
+    }
+    sessions.setProcessing(key, false);
+    const session = sessions.endActive(key);
+    sessionApprovedTools.delete(keyStr);
+    if (session) {
+      topics.unregisterThread(chatId, threadId);
+      await sessions.save();
+      process.stderr.write(`🛑  Auto-stopped session in closed topic ${threadId} (chat ${chatId})\n`);
+      refreshCockpit(chatId);
+    }
+    return;
+  }
+
   const userId = message.from?.id;
   if (!userId) return;
 
@@ -568,6 +787,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
   // ─── Forum topic routing ─────────────────────────────────────────────
   const isForum = await topics.isForum(chatId);
   if (isForum) {
+    ensureGeneralPin(chatId);
     const isGeneralTopic = !message.is_topic_message;
 
     const MANAGEMENT_COMMANDS: ReadonlySet<string> = new Set([
@@ -599,21 +819,11 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
 
     if (isGeneralTopic) {
       if (cmd.type === "prompt") {
-        await tg.sendMessage(
-          chatId,
-          "Send prompts in a session topic.\nUse /new to create one.",
-          undefined,
-          key.threadId,
-        );
+        await sendGeneralMessage(chatId, "Send prompts in a session topic.\nUse /new to create one.");
         return;
       }
       if (!MANAGEMENT_COMMANDS.has(cmd.type) && cmd.type !== "unknown_command") {
-        await tg.sendMessage(
-          chatId,
-          "This command works in session topics.\nUse /sessions to find yours.",
-          undefined,
-          key.threadId,
-        );
+        await sendGeneralMessage(chatId, "This command works in session topics.\nUse /sessions to find yours.");
         return;
       }
     } else {
@@ -687,10 +897,9 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       await handlePause(key, cmd.jobId);
       break;
     case "unknown_command":
-      await tg.sendMessage(
+      await sendGeneralMessage(
         chatId,
         `Unknown command: ${fmt.code(cmd.text)}\nUse /help for available commands, or send without / to chat with Claude.`,
-        undefined,
         key.threadId,
       );
       break;
@@ -843,6 +1052,12 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
       case "status":
         await handleStatus(key);
         break;
+      case "jobs":
+        await handleJobs(key);
+        break;
+      case "dirs":
+        await showNewPicker(key);
+        break;
     }
     return;
   }
@@ -867,6 +1082,21 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
       await tg.answerCallbackQuery(query.id, "🆕 Creating session…");
       await handleNew(key, state.currentPath);
       dirBrowserState.delete(keyStr);
+      // Replace the browser message with a compact confirmation + topic link
+      const session =
+        sessions.getActive({ chatId: key.chatId, threadId: undefined }) === undefined
+          ? sessions.getActiveForChat(key.chatId).find((s) => s.cwd === state.currentPath)
+          : undefined;
+      const dirName = state.currentPath.split("/").pop() ?? state.currentPath;
+      let confirmText = `🆕 Session created in ${fmt.code(dirName)}`;
+      if (session?.threadId) {
+        const link = topics.getTopicLink(key.chatId, session.threadId);
+        if (link) confirmText += ` — <a href="${link}">Open topic</a>`;
+      }
+      const prev = lastGeneralMessage.get(key.chatId);
+      if (prev) {
+        await tg.editMessageText(key.chatId, prev, confirmText).catch(() => undefined);
+      }
       return;
     }
 
@@ -1073,6 +1303,7 @@ async function handleNew(key: TopicKey, cwd?: string, name?: string): Promise<vo
       );
       await pinSessionStatus(session);
       await sessions.save();
+      refreshCockpit(key.chatId);
       return;
     } catch (err) {
       process.stderr.write(`⚠️  Failed to create forum topic: ${err}\n`);
@@ -1186,6 +1417,7 @@ async function resumeSession(key: TopicKey, session: SessionInfo): Promise<void>
         session.threadId,
       );
       await pinSessionStatus(session);
+      refreshCockpit(key.chatId);
       return;
     } catch {
       // Topic was deleted — create a new one
@@ -1210,6 +1442,7 @@ async function resumeSession(key: TopicKey, session: SessionInfo): Promise<void>
         threadId,
       );
       await pinSessionStatus(session);
+      refreshCockpit(key.chatId);
       return;
     } catch (err) {
       process.stderr.write(`⚠️  Failed to create forum topic for resume: ${err}\n`);
@@ -1229,7 +1462,7 @@ async function resumeSession(key: TopicKey, session: SessionInfo): Promise<void>
 async function handleListSessions(key: TopicKey): Promise<void> {
   const history = sessions.listForChat(key.chatId);
   if (history.length === 0) {
-    await tg.sendMessage(key.chatId, "No sessions yet. Use /new to start one.", undefined, key.threadId);
+    await sendGeneralMessage(key.chatId, "No sessions yet. Use /new to start one.", key.threadId);
     return;
   }
 
@@ -1260,12 +1493,10 @@ async function handleListSessions(key: TopicKey): Promise<void> {
     buttonRows.push(row);
   }
 
-  await tg.sendMessageWithKeyboard(
+  await sendGeneralKeyboard(
     key.chatId,
     `📋 <b>Sessions:</b>\n\n${lines.join("\n")}`,
-    {
-      inline_keyboard: buttonRows,
-    },
+    { inline_keyboard: buttonRows },
     key.threadId,
   );
 }
@@ -1296,6 +1527,7 @@ async function handleStop(key: TopicKey): Promise<void> {
       undefined,
       key.threadId,
     );
+    refreshCockpit(key.chatId);
   } else {
     await tg.sendMessage(
       key.chatId,
@@ -1440,11 +1672,10 @@ async function handleSchedule(
 
   const parsed = parseScheduleExpression(scheduleExpr);
   if (!parsed) {
-    await tg.sendMessage(
+    await sendGeneralMessage(
       key.chatId,
       `❌ Invalid schedule: ${fmt.code(scheduleExpr)}\n\n` +
         "Examples: every 30m, every 2h, at 9am weekdays, cron */15 * * * *",
-      undefined,
       key.threadId,
     );
     return;
@@ -1459,7 +1690,7 @@ async function handleSchedule(
       threadId: key.threadId,
     });
   } catch (err) {
-    await tg.sendMessage(key.chatId, `❌ ${err instanceof Error ? err.message : String(err)}`, undefined, key.threadId);
+    await sendGeneralMessage(key.chatId, `❌ ${err instanceof Error ? err.message : String(err)}`, key.threadId);
     return;
   }
 
@@ -1468,7 +1699,7 @@ async function handleSchedule(
   const nextRun = job.nextRunAt ? new Date(job.nextRunAt).toLocaleString() : "unknown";
   const label = name ? fmt.bold(escapeHtml(name)) : fmt.code(prompt.slice(0, 50));
 
-  await tg.sendMessageWithKeyboard(
+  await sendGeneralKeyboard(
     key.chatId,
     [
       `⏰ <b>Scheduled${parsed.recurring ? "" : " (one-shot)"}</b>`,
@@ -1487,7 +1718,7 @@ async function handleSchedule(
 }
 
 async function handleScheduleHelp(chatId: number): Promise<void> {
-  await tg.sendMessage(
+  await sendGeneralMessage(
     chatId,
     [
       `<b>Usage:</b> ${fmt.code('/schedule "prompt" <when>')}`,
@@ -1516,7 +1747,7 @@ async function handleScheduleHelp(chatId: number): Promise<void> {
 async function handleJobs(key: TopicKey): Promise<void> {
   const jobs = scheduler.list(key.chatId);
   if (jobs.length === 0) {
-    await tg.sendMessage(key.chatId, "No scheduled jobs. Use /schedule to create one.", undefined, key.threadId);
+    await sendGeneralMessage(key.chatId, "No scheduled jobs. Use /schedule to create one.", key.threadId);
     return;
   }
 
@@ -1541,32 +1772,32 @@ async function handleJobs(key: TopicKey): Promise<void> {
     ]);
   }
 
-  await tg.sendMessageWithKeyboard(key.chatId, lines.join("\n"), { inline_keyboard: buttons }, key.threadId);
+  await sendGeneralKeyboard(key.chatId, lines.join("\n"), { inline_keyboard: buttons }, key.threadId);
 }
 
 async function handleCancel(key: TopicKey, jobId: string): Promise<void> {
   const job = scheduler.findById(jobId);
   if (!job || job.chatId !== key.chatId) {
-    await tg.sendMessage(key.chatId, `❌ Job not found: ${fmt.code(jobId)}`, undefined, key.threadId);
+    await sendGeneralMessage(key.chatId, `❌ Job not found: ${fmt.code(jobId)}`, key.threadId);
     return;
   }
   scheduler.delete(job.id);
   await scheduler.save();
   const label = job.name ?? job.prompt.slice(0, 40);
-  await tg.sendMessage(key.chatId, `🗑 Cancelled: ${escapeHtml(label)} (${fmt.code(job.id)})`, undefined, key.threadId);
+  await sendGeneralMessage(key.chatId, `🗑 Cancelled: ${escapeHtml(label)} (${fmt.code(job.id)})`, key.threadId);
 }
 
 async function handlePause(key: TopicKey, jobId: string): Promise<void> {
   const job = scheduler.findById(jobId);
   if (!job || job.chatId !== key.chatId) {
-    await tg.sendMessage(key.chatId, `❌ Job not found: ${fmt.code(jobId)}`, undefined, key.threadId);
+    await sendGeneralMessage(key.chatId, `❌ Job not found: ${fmt.code(jobId)}`, key.threadId);
     return;
   }
   scheduler.toggle(job.id);
   await scheduler.save();
   const state = job.enabled ? "▶️ Resumed" : "⏸ Paused";
   const label = job.name ?? job.prompt.slice(0, 40);
-  await tg.sendMessage(key.chatId, `${state}: ${escapeHtml(label)} (${fmt.code(job.id)})`, undefined, key.threadId);
+  await sendGeneralMessage(key.chatId, `${state}: ${escapeHtml(label)} (${fmt.code(job.id)})`, key.threadId);
 }
 
 // ─── Scheduled job execution ─────────────────────────────────────────────────
@@ -1638,7 +1869,7 @@ async function handleHelp(key: TopicKey): Promise<void> {
     headerLines.push("<i>No active session — start one with /new</i>", "");
   }
 
-  await tg.sendMessage(
+  await sendGeneralMessage(
     key.chatId,
     [
       "🤖 <b>Telegram Claude Orchestrator</b>",
@@ -1673,7 +1904,6 @@ async function handleHelp(key: TopicKey): Promise<void> {
       "",
       "Send any text to interact with Claude.",
     ].join("\n"),
-    undefined,
     key.threadId,
   );
 }
@@ -1809,13 +2039,13 @@ async function handleBookmark(chatId: number, path?: string, name?: string): Pro
   if (!path) {
     // Show existing bookmarks with instructions
     if (bookmarks.length === 0) {
-      await tg.sendMessage(
+      await sendGeneralMessage(
         chatId,
         `No bookmarks yet.\n\nUsage: ${fmt.code("/bookmark /path/to/project --name alias")}`,
       );
     } else {
       const lines = bookmarks.map((b) => `📌 ${fmt.code(b.name)} → ${fmt.code(b.path)}`);
-      await tg.sendMessage(chatId, `<b>Bookmarks:</b>\n${lines.join("\n")}`);
+      await sendGeneralMessage(chatId, `<b>Bookmarks:</b>\n${lines.join("\n")}`);
     }
     return;
   }
@@ -1824,11 +2054,11 @@ async function handleBookmark(chatId: number, path?: string, name?: string): Pro
   try {
     const s = await stat(path);
     if (!s.isDirectory()) {
-      await tg.sendMessage(chatId, `❌ Not a directory: ${fmt.code(path)}`);
+      await sendGeneralMessage(chatId, `❌ Not a directory: ${fmt.code(path)}`);
       return;
     }
   } catch {
-    await tg.sendMessage(chatId, `❌ Directory not found: ${fmt.code(path)}`);
+    await sendGeneralMessage(chatId, `❌ Directory not found: ${fmt.code(path)}`);
     return;
   }
 
@@ -1844,7 +2074,7 @@ async function handleBookmark(chatId: number, path?: string, name?: string): Pro
   }
   await saveBookmarks();
 
-  await tg.sendMessage(chatId, `📌 Bookmarked ${fmt.code(alias)} → ${fmt.code(path)}`);
+  await sendGeneralMessage(chatId, `📌 Bookmarked ${fmt.code(alias)} → ${fmt.code(path)}`);
 }
 
 // ─── Claude subprocess management ─────────────────────────────────────────────
@@ -2078,6 +2308,7 @@ async function runQuery(key: TopicKey, session: SessionInfo, prompt: string, rep
           chatId,
           `${icon} ${prefix} <b>${escapeHtml(label)}</b>${result.error ? " error" : " completed"}${costInfo}`,
         );
+        refreshCockpit(chatId);
       }
     }
   } finally {
