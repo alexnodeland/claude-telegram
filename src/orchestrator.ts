@@ -21,7 +21,7 @@
  * Runtime: Bun ≥ 1.1
  */
 
-import { readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   addToAllowlist,
@@ -39,7 +39,7 @@ import {
   SCHEDULER_CHECK_INTERVAL_MS,
   TYPING_INTERVAL_MS,
 } from "./config.js";
-import { escapeHtml, fmt } from "./html.js";
+import { escapeHtml, fmt, stripHtml } from "./html.js";
 import { type RelayServer, startRelayServer } from "./relay-server.js";
 import { parseScheduleExpression, ScheduleManager } from "./scheduler.js";
 import { SessionManager } from "./sessions.js";
@@ -412,6 +412,104 @@ await tg
   ])
   .catch((e: Error) => process.stderr.write(`⚠️  setMyCommands failed: ${e.message}\n`));
 
+// ─── Forum helpers ───────────────────────────────────────────────────────────
+
+/** Build compact status text for the pinned message in a session topic. */
+function buildSessionStatusText(session: SessionInfo): string {
+  const model = session.model ?? globalModel ?? "(default)";
+  const mode = session.permissionMode ?? globalPermissionMode;
+  const cost = (session.totalCost ?? 0).toFixed(4);
+  const state = sessions.isProcessing({ chatId: session.chatId, threadId: session.threadId })
+    ? "🟢 Running"
+    : "⚪ Idle";
+  return [
+    `📂 ${fmt.code(session.cwd)}`,
+    `🤖 ${fmt.code(model)} · ⚡ ${fmt.code(mode)} · ${state}`,
+    `💰 $${cost} · ${session.totalTurns ?? 0} turns`,
+  ].join("\n");
+}
+
+/** Update the pinned status message for a session (best-effort). */
+async function updatePinnedStatus(session: SessionInfo): Promise<void> {
+  if (session.pinnedMessageId == null || session.chatId == null) return;
+  await tg
+    .editMessageText(session.chatId, session.pinnedMessageId, buildSessionStatusText(session))
+    .catch(() => undefined);
+}
+
+/** Send and pin a status message in a session topic. */
+async function pinSessionStatus(session: SessionInfo): Promise<void> {
+  if (session.threadId == null) return;
+  try {
+    const msg = await tg.sendMessage(session.chatId, buildSessionStatusText(session), undefined, session.threadId);
+    session.pinnedMessageId = msg.message_id;
+    await tg.pinChatMessage(session.chatId, msg.message_id).catch(() => undefined);
+  } catch {
+    // Best-effort — bot may lack can_pin_messages
+  }
+}
+
+/** Send a notification to the General topic (no-op for non-forum chats). */
+async function notifyGeneral(chatId: number, text: string): Promise<void> {
+  const isForum = await topics.isForum(chatId);
+  if (!isForum) return;
+  await tg.sendMessage(chatId, text).catch(() => undefined);
+}
+
+/** Quick-start inline keyboard for new/resumed sessions in forum topics. */
+const SESSION_QUICK_BUTTONS = {
+  inline_keyboard: [
+    [
+      { text: "🔄 Set model", callback_data: "quick:model" },
+      { text: "⚡ Set mode", callback_data: "quick:mode" },
+    ],
+    [
+      { text: "📋 Status", callback_data: "quick:status" },
+      { text: "❓ Help", callback_data: "quick:help" },
+    ],
+  ],
+};
+
+/** Download a photo or document attachment, saving to the session's upload dir. */
+async function downloadAttachment(
+  message: TelegramMessage,
+  session: SessionInfo,
+): Promise<{ localPath: string; description: string } | null> {
+  try {
+    const uploadDir = join(session.cwd, ".claude", "telegram-uploads");
+
+    if (message.photo && message.photo.length > 0) {
+      const photo = message.photo[message.photo.length - 1];
+      if (!photo) return null;
+      const file = await tg.getFile(photo.file_id);
+      const data = await tg.downloadFile(file.file_path);
+      const ext = file.file_path.split(".").pop() ?? "jpg";
+      const filename = `photo-${Date.now()}.${ext}`;
+      const localPath = join(uploadDir, filename);
+      await mkdir(uploadDir, { recursive: true });
+      await writeFile(localPath, data);
+      return { localPath, description: `[User sent a photo (${photo.width}x${photo.height}), saved to ${localPath}]` };
+    }
+
+    if (message.document) {
+      const doc = message.document;
+      const file = await tg.getFile(doc.file_id);
+      const data = await tg.downloadFile(file.file_path);
+      const filename = doc.file_name ?? `file-${Date.now()}`;
+      const localPath = join(uploadDir, filename);
+      await mkdir(uploadDir, { recursive: true });
+      await writeFile(localPath, data);
+      return {
+        localPath,
+        description: `[User sent a file: ${doc.file_name ?? "document"} (${doc.mime_type ?? "unknown type"}), saved to ${localPath}]`,
+      };
+    }
+  } catch (err) {
+    process.stderr.write(`⚠️  Failed to download attachment: ${err}\n`);
+  }
+  return null;
+}
+
 // ─── Message handling ─────────────────────────────────────────────────────────
 
 let lastUpdateId = 0;
@@ -422,7 +520,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
 
   const chatId = message.chat.id;
   const key = getTopicKey(message);
-  const text = (message.text ?? "").trim();
+  const text = (message.text ?? message.caption ?? "").trim();
 
   // Handle /start and /pair — generate pairing code
   if (text === "/start" || text === "/pair") {
@@ -596,9 +694,31 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
         key.threadId,
       );
       break;
-    case "prompt":
-      await handlePrompt(key, cmd.text, message.message_id);
+    case "prompt": {
+      let promptText = cmd.text;
+
+      // Download and include file/photo attachments
+      const activeSession = sessions.getActive(key);
+      if (activeSession && (message.photo || message.document)) {
+        const attachment = await downloadAttachment(message, activeSession);
+        if (attachment) {
+          promptText = `${attachment.description}\n\n${promptText || "What is this?"}`;
+        }
+      }
+
+      // Include replied-to bot message as context
+      if (message.reply_to_message?.from?.id === botInfo.id) {
+        const repliedText = message.reply_to_message.text ?? message.reply_to_message.caption ?? "";
+        if (repliedText) {
+          const plain = stripHtml(repliedText);
+          const preview = plain.length > 500 ? `${plain.slice(0, 500)}…` : plain;
+          promptText = `[Replying to your previous message: "${preview}"]\n\n${promptText}`;
+        }
+      }
+
+      await handlePrompt(key, promptText, message.message_id);
       break;
+    }
   }
 }
 
@@ -713,6 +833,15 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
         break;
       case "help":
         await handleHelp(key);
+        break;
+      case "model":
+        await handleModel(key);
+        break;
+      case "mode":
+        await handleMode(key);
+        break;
+      case "status":
+        await handleStatus(key);
         break;
     }
     return;
@@ -936,12 +1065,14 @@ async function handleNew(key: TopicKey, cwd?: string, name?: string): Promise<vo
       topics.registerThread(key.chatId, threadId, session.sessionId);
       await sessions.save();
 
-      await tg.sendMessage(
+      await tg.sendMessageWithKeyboard(
         key.chatId,
-        `🆕 New session in ${fmt.code(targetCwd)}\n${name ? `Name: <b>${escapeHtml(name)}</b>\n` : ""}\nSend a message in the topic to get started.`,
-        undefined,
+        `🆕 New session in ${fmt.code(targetCwd)}\n${name ? `Name: <b>${escapeHtml(name)}</b>\n` : ""}\nSend a message to get started, or tap a quick action:`,
+        SESSION_QUICK_BUTTONS,
         threadId,
       );
+      await pinSessionStatus(session);
+      await sessions.save();
       return;
     } catch (err) {
       process.stderr.write(`⚠️  Failed to create forum topic: ${err}\n`);
@@ -1048,12 +1179,13 @@ async function resumeSession(key: TopicKey, session: SessionInfo): Promise<void>
       const newKey: TopicKey = { chatId: key.chatId, threadId: session.threadId };
       sessions.setActive(newKey, session);
       topics.registerThread(key.chatId, session.threadId, session.sessionId);
-      await tg.sendMessage(
+      await tg.sendMessageWithKeyboard(
         key.chatId,
-        `🔄 Resumed <b>${escapeHtml(label)}</b> in ${fmt.code(session.cwd)}\n\nContinue in the reopened topic.`,
-        undefined,
+        `🔄 Resumed <b>${escapeHtml(label)}</b> in ${fmt.code(session.cwd)}`,
+        SESSION_QUICK_BUTTONS,
         session.threadId,
       );
+      await pinSessionStatus(session);
       return;
     } catch {
       // Topic was deleted — create a new one
@@ -1071,12 +1203,13 @@ async function resumeSession(key: TopicKey, session: SessionInfo): Promise<void>
       sessions.setActive(newKey, session);
       topics.registerThread(key.chatId, threadId, session.sessionId);
       await sessions.save();
-      await tg.sendMessage(
+      await tg.sendMessageWithKeyboard(
         key.chatId,
-        `🔄 Resumed <b>${escapeHtml(label)}</b> in ${fmt.code(session.cwd)}\n\nSend a message in the topic to continue.`,
-        undefined,
+        `🔄 Resumed <b>${escapeHtml(label)}</b> in ${fmt.code(session.cwd)}`,
+        SESSION_QUICK_BUTTONS,
         threadId,
       );
+      await pinSessionStatus(session);
       return;
     } catch (err) {
       process.stderr.write(`⚠️  Failed to create forum topic for resume: ${err}\n`);
@@ -1111,22 +1244,19 @@ async function handleListSessions(key: TopicKey): Promise<void> {
   });
 
   // Build inline keyboard for quick resume — show title/name instead of IDs
-  const buttons = history.slice(0, 5).map((s) => {
+  // In forum chats, also include a topic link button for sessions with threadId
+  const isForum = await topics.isForum(key.chatId);
+  const buttonRows: Array<Array<{ text: string; callback_data?: string; url?: string }>> = [];
+  for (const s of history.slice(0, 5)) {
     const label = s.name ?? s.title ?? `${s.sessionId.slice(0, 8)}…`;
-    // Telegram callback_data max 64 bytes
     const truncLabel = label.length > 20 ? `${label.slice(0, 20)}…` : label;
-    return {
-      text: truncLabel,
-      callback_data: `resume:${s.sessionId.slice(0, 8)}`,
-    };
-  });
-
-  // Split buttons into rows of 2
-  const buttonRows: Array<Array<{ text: string; callback_data: string }>> = [];
-  for (let i = 0; i < buttons.length; i += 2) {
-    const row = [buttons[i]].filter(Boolean) as Array<{ text: string; callback_data: string }>;
-    const b2 = buttons[i + 1];
-    if (b2) row.push(b2);
+    const row: Array<{ text: string; callback_data?: string; url?: string }> = [
+      { text: truncLabel, callback_data: `resume:${s.sessionId.slice(0, 8)}` },
+    ];
+    if (isForum && s.threadId != null) {
+      const link = topics.getTopicLink(key.chatId, s.threadId);
+      if (link) row.push({ text: "📍 Topic", url: link });
+    }
     buttonRows.push(row);
   }
 
@@ -1233,6 +1363,7 @@ async function handleModel(key: TopicKey, model?: string): Promise<void> {
   if (session) {
     session.model = model;
     await sessions.save();
+    updatePinnedStatus(session);
   }
   globalModel = model;
   await tg.sendMessage(key.chatId, `✅ Model set to ${fmt.code(model)}`, undefined, key.threadId);
@@ -1656,6 +1787,7 @@ async function handleMode(key: TopicKey, mode?: PermissionMode): Promise<void> {
   if (session) {
     session.permissionMode = mode;
     await sessions.save();
+    updatePinnedStatus(session);
   }
   globalPermissionMode = mode;
   await tg.sendMessage(
@@ -1730,7 +1862,29 @@ async function handleClaudeCommand(
 }
 
 async function handlePrompt(key: TopicKey, text: string, replyToMessageId?: number): Promise<void> {
-  const session = sessions.getActive(key);
+  let session = sessions.getActive(key);
+
+  // Auto-resume: if no active session but we're in a forum topic with a known session
+  if (!session && key.threadId != null) {
+    const isForum = await topics.isForum(key.chatId);
+    if (isForum) {
+      const histSession = sessions.findByThread(key.chatId, key.threadId);
+      if (histSession) {
+        try {
+          await topics.reopenTopic(key.chatId, key.threadId);
+        } catch {
+          /* already open */
+        }
+        sessions.setActive(key, histSession);
+        topics.registerThread(key.chatId, key.threadId, histSession.sessionId);
+        await sessions.save();
+        session = histSession;
+        const label = histSession.name ?? histSession.title ?? histSession.sessionId.slice(0, 8);
+        await tg.sendMessage(key.chatId, `🔄 Auto-resumed <b>${escapeHtml(label)}</b>`, undefined, key.threadId);
+      }
+    }
+  }
+
   if (!session) {
     await tg.sendMessage(
       key.chatId,
@@ -1909,6 +2063,22 @@ async function runQuery(key: TopicKey, session: SessionInfo, prompt: string, rep
       await renderer.error("Session ended with an error.");
     } else {
       await renderer.finish(costStr);
+    }
+
+    // Update pinned status + notify General topic
+    const currentSession = sessions.getActive(key);
+    if (currentSession) {
+      updatePinnedStatus(currentSession);
+      if (key.threadId != null) {
+        const label = currentSession.name ?? currentSession.title ?? currentSession.sessionId.slice(0, 8);
+        const prefix = key.jobId ? "Job" : "Session";
+        const costInfo = costStr ? ` · ${costStr}` : "";
+        const icon = result.error ? "❌" : "✅";
+        notifyGeneral(
+          chatId,
+          `${icon} ${prefix} <b>${escapeHtml(label)}</b>${result.error ? " error" : " completed"}${costInfo}`,
+        );
+      }
     }
   } finally {
     clearInterval(typingTimer);

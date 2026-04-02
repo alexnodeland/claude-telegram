@@ -211,6 +211,25 @@ describe("SessionManager", () => {
     expect(s.threadId).toBe(42);
   });
 
+  // ─── findByThread ──────────────────────────────────────────────────────
+
+  test("findByThread returns most recent session for threadId", () => {
+    const mgr = new SessionManager("/tmp/unused.json");
+    const s1 = mgr.create(k(100, 42), "/a", "sess-1");
+    s1.lastActiveAt = 1000;
+    const s2 = mgr.create(k(100, 42), "/b", "sess-2");
+    s2.lastActiveAt = 3000;
+
+    const found = mgr.findByThread(100, 42);
+    expect(found?.sessionId).toBe("sess-2");
+  });
+
+  test("findByThread returns undefined for unknown threadId", () => {
+    const mgr = new SessionManager("/tmp/unused.json");
+    mgr.create(k(100, 42), "/a", "sess-1");
+    expect(mgr.findByThread(100, 99)).toBeUndefined();
+  });
+
   // ─── getAllActive / countProcessingJobs ─────────────────────────────────
 
   test("getAllActive returns all active sessions across chats", () => {

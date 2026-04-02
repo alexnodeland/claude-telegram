@@ -46,6 +46,13 @@ export class SessionManager {
     return results;
   }
 
+  /** Find the most recent session (active or historical) for a given thread. */
+  findByThread(chatId: number, threadId: number): SessionInfo | undefined {
+    return this.history
+      .filter((s) => s.chatId === chatId && s.threadId === threadId)
+      .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
+  }
+
   /** Find active session by its Forum Topic thread ID. */
   getActiveByThread(chatId: number, threadId: number): SessionInfo | undefined {
     for (const session of this.active.values()) {

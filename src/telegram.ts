@@ -124,6 +124,14 @@ export class TelegramClient {
     });
   }
 
+  async pinChatMessage(chatId: number, messageId: number, disableNotification = true): Promise<void> {
+    await this.call("pinChatMessage", {
+      chat_id: chatId,
+      message_id: messageId,
+      disable_notification: disableNotification,
+    });
+  }
+
   async sendChatAction(
     chatId: number,
     action: "typing" | "upload_document" | "upload_photo" = "typing",

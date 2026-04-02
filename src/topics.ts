@@ -1,15 +1,21 @@
 import type { TelegramClient } from "./telegram.js";
-import type { SessionInfo } from "./types.js";
+import type { SessionInfo, TelegramChatInfo } from "./types.js";
 
 const MAX_TOPIC_NAME_LENGTH = 128;
+
+/** Telegram Forum Topic icon colors (fixed palette). */
+export const TOPIC_COLORS = {
+  SESSION: 7322096, // blue
+  JOB: 9367192, // green
+} as const;
 
 function truncate(name: string, maxLen: number): string {
   return name.length > maxLen ? `${name.slice(0, maxLen - 1)}…` : name;
 }
 
 export class TopicManager {
-  /** Cache: chatId → is_forum */
-  private forumCache = new Map<number, boolean>();
+  /** Cache: chatId → chat info (includes is_forum, username, etc.) */
+  private chatInfoCache = new Map<number, TelegramChatInfo>();
 
   /** Active mapping: "chatId:threadId" → sessionId (for routing inbound messages) */
   private threadToSession = new Map<string, string>();
@@ -18,35 +24,48 @@ export class TopicManager {
 
   // ─── Forum detection ──────────────────────────────────────────────────
 
-  async isForum(chatId: number): Promise<boolean> {
-    const cached = this.forumCache.get(chatId);
-    if (cached !== undefined) return cached;
+  async getChatInfo(chatId: number): Promise<TelegramChatInfo | null> {
+    const cached = this.chatInfoCache.get(chatId);
+    if (cached) return cached;
     try {
       const info = await this.tg.getChat(chatId);
-      const result = info.is_forum === true;
-      this.forumCache.set(chatId, result);
-      return result;
+      this.chatInfoCache.set(chatId, info);
+      return info;
     } catch {
-      this.forumCache.set(chatId, false);
-      return false;
+      return null;
     }
   }
 
+  async isForum(chatId: number): Promise<boolean> {
+    const info = await this.getChatInfo(chatId);
+    return info?.is_forum === true;
+  }
+
   invalidateCache(chatId: number): void {
-    this.forumCache.delete(chatId);
+    this.chatInfoCache.delete(chatId);
+  }
+
+  // ─── Topic links ─────────────────────────────────────────────────────
+
+  getTopicLink(chatId: number, threadId: number): string | null {
+    const info = this.chatInfoCache.get(chatId);
+    if (!info) return null;
+    if (info.username) return `https://t.me/${info.username}/${threadId}`;
+    const channelId = String(chatId).replace(/^-100/, "");
+    return `https://t.me/c/${channelId}/${threadId}`;
   }
 
   // ─── Topic lifecycle ──────────────────────────────────────────────────
 
   async createSessionTopic(chatId: number, sessionName: string): Promise<number> {
     const name = truncate(`Session: ${sessionName}`, MAX_TOPIC_NAME_LENGTH);
-    const topic = await this.tg.createForumTopic(chatId, name);
+    const topic = await this.tg.createForumTopic(chatId, name, TOPIC_COLORS.SESSION);
     return topic.message_thread_id;
   }
 
   async createJobTopic(chatId: number, jobName: string): Promise<number> {
     const name = truncate(`Job: ${jobName}`, MAX_TOPIC_NAME_LENGTH);
-    const topic = await this.tg.createForumTopic(chatId, name);
+    const topic = await this.tg.createForumTopic(chatId, name, TOPIC_COLORS.JOB);
     return topic.message_thread_id;
   }
 

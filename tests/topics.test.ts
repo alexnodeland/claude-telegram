@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { TopicManager } from "../src/topics.js";
+import { TOPIC_COLORS, TopicManager } from "../src/topics.js";
 import type { SessionInfo, TelegramChatInfo, TelegramForumTopic } from "../src/types.js";
 
 /** Minimal mock TelegramClient for TopicManager tests. */
@@ -103,6 +103,30 @@ describe("TopicManager", () => {
     expect(capturedName.startsWith("Session: ")).toBe(true);
   });
 
+  test("createSessionTopic passes blue icon color", async () => {
+    let capturedColor: number | undefined;
+    const tg = mockTg({ createThreadId: 1 });
+    tg.createForumTopic = async (_chatId: number, _name: string, iconColor?: number) => {
+      capturedColor = iconColor;
+      return { message_thread_id: 1, name: _name };
+    };
+    const tm = new TopicManager(tg);
+    await tm.createSessionTopic(100, "test");
+    expect(capturedColor).toBe(TOPIC_COLORS.SESSION); // blue
+  });
+
+  test("createJobTopic passes green icon color", async () => {
+    let capturedColor: number | undefined;
+    const tg = mockTg({ createThreadId: 1 });
+    tg.createForumTopic = async (_chatId: number, _name: string, iconColor?: number) => {
+      capturedColor = iconColor;
+      return { message_thread_id: 1, name: _name };
+    };
+    const tm = new TopicManager(tg);
+    await tm.createJobTopic(100, "test");
+    expect(capturedColor).toBe(TOPIC_COLORS.JOB); // green
+  });
+
   test("closeTopic does not throw on error", async () => {
     const tg = mockTg();
     tg.closeForumTopic = async () => {
@@ -154,5 +178,49 @@ describe("TopicManager", () => {
     expect(tm.getSessionForThread(100, 99)).toBe("sess-2");
     // Session without threadId should not be mapped
     expect(tm.getSessionForThread(200, 0)).toBeUndefined();
+  });
+
+  // ─── Topic links ─────────────────────────────────────────────────────
+
+  test("getTopicLink returns null before cache is populated", () => {
+    const tm = new TopicManager(mockTg());
+    expect(tm.getTopicLink(100, 42)).toBeNull();
+  });
+
+  test("getTopicLink uses username for public groups", async () => {
+    const tg = mockTg({ isForum: true });
+    tg.getChat = async (chatId: number) =>
+      ({ id: chatId, type: "supergroup", is_forum: true, username: "mygroup" }) as TelegramChatInfo;
+    const tm = new TopicManager(tg);
+    await tm.isForum(100); // populate cache
+    expect(tm.getTopicLink(100, 42)).toBe("https://t.me/mygroup/42");
+  });
+
+  test("getTopicLink uses channel ID for private groups", async () => {
+    const tg = mockTg({ isForum: true });
+    tg.getChat = async (chatId: number) =>
+      ({ id: chatId, type: "supergroup", is_forum: true }) as TelegramChatInfo;
+    const tm = new TopicManager(tg);
+    await tm.isForum(-1001234567890); // populate cache
+    expect(tm.getTopicLink(-1001234567890, 42)).toBe("https://t.me/c/1234567890/42");
+  });
+
+  test("getChatInfo caches result", async () => {
+    let callCount = 0;
+    const tg = mockTg({ isForum: true });
+    const origGetChat = tg.getChat.bind(tg);
+    tg.getChat = async (chatId: number) => {
+      callCount++;
+      return origGetChat(chatId);
+    };
+    const tm = new TopicManager(tg);
+    await tm.getChatInfo(100);
+    await tm.getChatInfo(100);
+    expect(callCount).toBe(1);
+  });
+
+  test("getChatInfo returns null on error", async () => {
+    const tm = new TopicManager(mockTg({ getChatThrows: true }));
+    expect(await tm.getChatInfo(100)).toBeNull();
   });
 });

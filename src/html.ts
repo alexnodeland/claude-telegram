@@ -10,6 +10,15 @@ export function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+/** Strip HTML tags and unescape entities — for converting Telegram HTML back to plain text. */
+export function stripHtml(text: string): string {
+  return text
+    .replace(/<[^>]+>/g, "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
 /** Formatting helpers — each auto-escapes content. */
 export const fmt = {
   bold: (text: string) => `<b>${escapeHtml(text)}</b>`,

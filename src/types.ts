@@ -93,6 +93,7 @@ export interface TelegramCallbackQuery {
 export interface TelegramInlineKeyboardButton {
   text: string;
   callback_data?: string;
+  url?: string;
 }
 
 export interface TelegramInlineKeyboardMarkup {
@@ -189,6 +190,8 @@ export interface SessionInfo {
   lastActiveAt: number;
   /** Forum Topic thread ID this session is associated with. */
   threadId?: number;
+  /** Message ID of the pinned status message in the session's forum topic. */
+  pinnedMessageId?: number;
 }
 
 export interface DirectoryBookmark {
