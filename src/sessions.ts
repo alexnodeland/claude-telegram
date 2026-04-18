@@ -1,15 +1,19 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { SessionInfo } from "./types.js";
+import type { SessionInfo, TopicKey, TopicKeyString } from "./types.js";
+import { topicKeyStr } from "./types.js";
 
 /**
  * Manages Claude Code sessions per Telegram chat.
  * Persists session history to disk so users can resume across restarts.
+ *
+ * Active sessions and processing flags are keyed by TopicKeyString to support
+ * concurrent sessions (Forum Topics, isolated job sessions).
  */
 export class SessionManager {
-  private active = new Map<number, SessionInfo>();
+  private active = new Map<TopicKeyString, SessionInfo>();
   private history: SessionInfo[] = [];
-  private processing = new Set<number>();
+  private processing = new Set<TopicKeyString>();
 
   constructor(private readonly storePath: string) {}
 
@@ -29,14 +33,38 @@ export class SessionManager {
     await writeFile(this.storePath, JSON.stringify({ sessions: this.history }, null, 2));
   }
 
-  getActive(chatId: number): SessionInfo | undefined {
-    return this.active.get(chatId);
+  getActive(key: TopicKey): SessionInfo | undefined {
+    return this.active.get(topicKeyStr(key));
   }
 
-  create(chatId: number, cwd: string, sessionId: string, name?: string, model?: string): SessionInfo {
+  /** Return all active sessions for a chat (across all topics/jobs). */
+  getActiveForChat(chatId: number): SessionInfo[] {
+    const results: SessionInfo[] = [];
+    for (const [_k, session] of this.active) {
+      if (session.chatId === chatId) results.push(session);
+    }
+    return results;
+  }
+
+  /** Find the most recent session (active or historical) for a given thread. */
+  findByThread(chatId: number, threadId: number): SessionInfo | undefined {
+    return this.history
+      .filter((s) => s.chatId === chatId && s.threadId === threadId)
+      .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
+  }
+
+  /** Find active session by its Forum Topic thread ID. */
+  getActiveByThread(chatId: number, threadId: number): SessionInfo | undefined {
+    for (const session of this.active.values()) {
+      if (session.chatId === chatId && session.threadId === threadId) return session;
+    }
+    return undefined;
+  }
+
+  create(key: TopicKey, cwd: string, sessionId: string, name?: string, model?: string): SessionInfo {
     const session: SessionInfo = {
       sessionId,
-      chatId,
+      chatId: key.chatId,
       cwd,
       name,
       model,
@@ -44,30 +72,33 @@ export class SessionManager {
       totalTurns: 0,
       createdAt: Date.now(),
       lastActiveAt: Date.now(),
+      threadId: key.threadId,
     };
-    this.active.set(chatId, session);
+    this.active.set(topicKeyStr(key), session);
     this.history.push(session);
     return session;
   }
 
   /** Promote a previous session to active (for /resume). */
-  setActive(chatId: number, session: SessionInfo): void {
+  setActive(key: TopicKey, session: SessionInfo): void {
     session.lastActiveAt = Date.now();
-    this.active.set(chatId, session);
+    if (key.threadId != null) session.threadId = key.threadId;
+    this.active.set(topicKeyStr(key), session);
   }
 
   /** Update the session ID once the real one comes back from Claude. */
-  updateSessionId(chatId: number, sessionId: string): void {
-    const session = this.active.get(chatId);
+  updateSessionId(key: TopicKey, sessionId: string): void {
+    const session = this.active.get(topicKeyStr(key));
     if (session) {
       session.sessionId = sessionId;
       session.lastActiveAt = Date.now();
     }
   }
 
-  endActive(chatId: number): SessionInfo | undefined {
-    const session = this.active.get(chatId);
-    this.active.delete(chatId);
+  endActive(key: TopicKey): SessionInfo | undefined {
+    const k = topicKeyStr(key);
+    const session = this.active.get(k);
+    this.active.delete(k);
     return session;
   }
 
@@ -91,20 +122,44 @@ export class SessionManager {
   }
 
   /** Accumulate cost and turns from a query result. */
-  addCost(chatId: number, cost: number, turns: number): void {
-    const session = this.active.get(chatId);
+  addCost(key: TopicKey, cost: number, turns: number): void {
+    const session = this.active.get(topicKeyStr(key));
     if (session) {
       session.totalCost = (session.totalCost ?? 0) + cost;
       session.totalTurns = (session.totalTurns ?? 0) + turns;
     }
   }
 
-  isProcessing(chatId: number): boolean {
-    return this.processing.has(chatId);
+  /** Return all active sessions (across all chats). */
+  getAllActive(): SessionInfo[] {
+    return Array.from(this.active.values());
   }
 
-  setProcessing(chatId: number, value: boolean): void {
-    if (value) this.processing.add(chatId);
-    else this.processing.delete(chatId);
+  /** Count processing entries that are job sessions for a given chat. */
+  countProcessingJobs(chatId: number): number {
+    let count = 0;
+    const prefix = `${chatId}:job:`;
+    for (const k of this.processing) {
+      if (k.startsWith(prefix)) count++;
+    }
+    return count;
+  }
+
+  isProcessing(key: TopicKey): boolean {
+    return this.processing.has(topicKeyStr(key));
+  }
+
+  /** Check if ANY session in a chat is processing (for backwards compat). */
+  isAnyChatProcessing(chatId: number): boolean {
+    for (const k of this.processing) {
+      if (k === `${chatId}` || k.startsWith(`${chatId}:`)) return true;
+    }
+    return false;
+  }
+
+  setProcessing(key: TopicKey, value: boolean): void {
+    const k = topicKeyStr(key);
+    if (value) this.processing.add(k);
+    else this.processing.delete(k);
   }
 }

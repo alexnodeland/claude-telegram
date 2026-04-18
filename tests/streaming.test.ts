@@ -4,22 +4,22 @@ import type { TelegramMessage } from "../src/types.js";
 
 /** Minimal mock of TelegramClient — only the methods used by streaming. */
 function mockTg() {
-  const sent: Array<{ chatId: number; text: string; replyToMessageId?: number }> = [];
+  const sent: Array<{ chatId: number; text: string; replyToMessageId?: number; threadId?: number }> = [];
   const edits: Array<{ chatId: number; messageId: number; text: string }> = [];
-  const docs: Array<{ chatId: number; filename: string }> = [];
+  const docs: Array<{ chatId: number; filename: string; threadId?: number }> = [];
   let nextId = 1;
 
   return {
     client: {
-      sendMessage: async (chatId: number, text: string, replyToMessageId?: number) => {
-        sent.push({ chatId, text, replyToMessageId });
+      sendMessage: async (chatId: number, text: string, replyToMessageId?: number, threadId?: number) => {
+        sent.push({ chatId, text, replyToMessageId, threadId });
         return { message_id: nextId++ } as TelegramMessage;
       },
       editMessageText: async (chatId: number, messageId: number, text: string) => {
         edits.push({ chatId, messageId, text });
       },
-      sendDocument: async (chatId: number, _data: Uint8Array, filename: string) => {
-        docs.push({ chatId, filename });
+      sendDocument: async (chatId: number, _data: Uint8Array, filename: string, _caption?: string, threadId?: number) => {
+        docs.push({ chatId, filename, threadId });
         return { message_id: nextId++ } as TelegramMessage;
       },
       deleteMessage: async () => {},

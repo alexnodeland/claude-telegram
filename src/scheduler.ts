@@ -34,7 +34,7 @@ export class ScheduleManager {
     cwd: string,
     cronExpr: string,
     prompt: string,
-    opts?: { name?: string; recurring?: boolean; sessionId?: string; expiresAt?: number },
+    opts?: { name?: string; recurring?: boolean; sessionId?: string; expiresAt?: number; threadId?: number },
   ): ScheduledJob {
     if (this.countForChat(chatId) >= MAX_JOBS_PER_CHAT) {
       throw new Error(`Job limit reached (max ${MAX_JOBS_PER_CHAT} per chat)`);
@@ -53,6 +53,7 @@ export class ScheduleManager {
       nextRunAt: computeNextRunAt(cronExpr),
       runCount: 0,
       expiresAt: opts?.expiresAt,
+      threadId: opts?.threadId,
       enabled: true,
     };
 

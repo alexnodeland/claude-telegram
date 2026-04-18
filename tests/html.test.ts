@@ -1,5 +1,23 @@
 import { describe, expect, test } from "bun:test";
-import { escapeHtml, fmt, markdownToTelegramHtml } from "../src/html.js";
+import { escapeHtml, fmt, markdownToTelegramHtml, stripHtml } from "../src/html.js";
+
+describe("stripHtml", () => {
+  test("strips HTML tags", () => {
+    expect(stripHtml("<b>bold</b> and <i>italic</i>")).toBe("bold and italic");
+  });
+
+  test("unescapes HTML entities", () => {
+    expect(stripHtml("a &lt; b &gt; c &amp; d")).toBe("a < b > c & d");
+  });
+
+  test("handles mixed content", () => {
+    expect(stripHtml('<a href="url">link</a> &amp; <code>code</code>')).toBe("link & code");
+  });
+
+  test("passes through plain text unchanged", () => {
+    expect(stripHtml("just plain text")).toBe("just plain text");
+  });
+});
 
 describe("escapeHtml", () => {
   test("escapes ampersand", () => {

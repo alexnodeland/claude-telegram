@@ -40,3 +40,5 @@ export const TYPING_INTERVAL_MS = 4_500;
 export const RELAY_PROMPT_TIMEOUT_MS = 120_000; // 2 minutes
 export const SCHEDULER_CHECK_INTERVAL_MS = 30_000; // 30 seconds
 export const MAX_JOBS_PER_CHAT = 25;
+export const MAX_SESSIONS_PER_CHAT = 5;
+export const MAX_CONCURRENT_JOBS_PER_CHAT = 3;

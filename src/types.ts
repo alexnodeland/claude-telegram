@@ -1,3 +1,36 @@
+// ─── Topic Key ──────────────────────────────────────────────────────────────
+// Composite key for routing messages to the correct session.
+// Replaces chatId-only keying to support concurrent sessions via Forum Topics.
+
+export interface TopicKey {
+  chatId: number;
+  /** Telegram message_thread_id — present when using Forum Topics. */
+  threadId?: number;
+  /** For flat-chat job isolation — ensures jobs don't share interactive session keys. */
+  jobId?: string;
+}
+
+/** Serialisable form for use as Map key. */
+export type TopicKeyString = string;
+
+export function topicKeyStr(key: TopicKey): TopicKeyString {
+  if (key.threadId != null) return `${key.chatId}:${key.threadId}`;
+  if (key.jobId) return `${key.chatId}:job:${key.jobId}`;
+  return `${key.chatId}`;
+}
+
+export function parseTopicKey(str: TopicKeyString): TopicKey {
+  if (str.includes(":job:")) {
+    const [chatId, , jobId] = str.split(":");
+    return { chatId: Number(chatId), jobId };
+  }
+  const parts = str.split(":");
+  if (parts.length === 2) {
+    return { chatId: Number(parts[0]), threadId: Number(parts[1]) };
+  }
+  return { chatId: Number(parts[0]) };
+}
+
 // ─── Telegram Bot API Types ─────────────────────────────────────────────────
 
 export interface TelegramUser {
@@ -43,6 +76,14 @@ export interface TelegramMessage {
   photo?: TelegramPhotoSize[];
   document?: TelegramDocument;
   reply_to_message?: TelegramMessage;
+  /** Present when the message is inside a Forum Topic. */
+  message_thread_id?: number;
+  /** True when the message is a topic message (not the General topic). */
+  is_topic_message?: boolean;
+  /** Service message: forum topic was closed. */
+  forum_topic_closed?: Record<string, never>;
+  /** Service message: forum topic was reopened. */
+  forum_topic_reopened?: Record<string, never>;
 }
 
 export interface TelegramCallbackQuery {
@@ -56,6 +97,7 @@ export interface TelegramCallbackQuery {
 export interface TelegramInlineKeyboardButton {
   text: string;
   callback_data?: string;
+  url?: string;
 }
 
 export interface TelegramInlineKeyboardMarkup {
@@ -65,6 +107,16 @@ export interface TelegramInlineKeyboardMarkup {
 export interface TelegramBotCommand {
   command: string;
   description: string;
+}
+
+export interface TelegramForumTopic {
+  message_thread_id: number;
+  name: string;
+  icon_color?: number;
+}
+
+export interface TelegramChatInfo extends TelegramChat {
+  is_forum?: boolean;
 }
 
 export interface TelegramUpdate {
@@ -140,6 +192,10 @@ export interface SessionInfo {
   totalTurns: number;
   createdAt: number;
   lastActiveAt: number;
+  /** Forum Topic thread ID this session is associated with. */
+  threadId?: number;
+  /** Message ID of the pinned status message in the session's forum topic. */
+  pinnedMessageId?: number;
 }
 
 export interface DirectoryBookmark {
@@ -164,6 +220,8 @@ export interface ScheduledJob {
   runCount: number;
   expiresAt?: number;
   enabled: boolean;
+  /** Forum Topic thread ID for this job's output. */
+  threadId?: number;
 }
 
 // ─── Permission Relay Protocol ───────────────────────────────────────────────
@@ -173,6 +231,8 @@ export interface RelayPromptRequest {
   requestId: string;
   toolName: string;
   toolInput: Record<string, unknown>;
+  /** Forum Topic thread ID for routing the permission prompt. */
+  threadId?: number;
 }
 
 export interface RelayPromptResponse {

@@ -1,6 +1,8 @@
 import { TELEGRAM_API_BASE } from "./config.js";
 import type {
   TelegramBotCommand,
+  TelegramChatInfo,
+  TelegramForumTopic,
   TelegramGetUpdatesResponse,
   TelegramInlineKeyboardMarkup,
   TelegramMessage,
@@ -49,13 +51,19 @@ export class TelegramClient {
     return res as TelegramUpdate[];
   }
 
-  async sendMessage(chatId: number, text: string, replyToMessageId?: number): Promise<TelegramMessage> {
+  async sendMessage(
+    chatId: number,
+    text: string,
+    replyToMessageId?: number,
+    threadId?: number,
+  ): Promise<TelegramMessage> {
     const body: Record<string, unknown> = {
       chat_id: chatId,
       text,
       parse_mode: "HTML",
     };
     if (replyToMessageId) body.reply_to_message_id = replyToMessageId;
+    if (threadId != null) body.message_thread_id = threadId;
     return this.call<TelegramMessage>("sendMessage", body);
   }
 
@@ -64,11 +72,13 @@ export class TelegramClient {
     fileData: Uint8Array,
     filename: string,
     caption?: string,
+    threadId?: number,
   ): Promise<TelegramMessage> {
     const form = new FormData();
     form.append("chat_id", String(chatId));
     form.append("document", new Blob([fileData]), filename);
     if (caption) form.append("caption", caption);
+    if (threadId != null) form.append("message_thread_id", String(threadId));
 
     const res = await fetch(`${this.base}/sendDocument`, {
       method: "POST",
@@ -81,11 +91,18 @@ export class TelegramClient {
     return json.result;
   }
 
-  async sendPhoto(chatId: number, imageData: Uint8Array, filename: string, caption?: string): Promise<TelegramMessage> {
+  async sendPhoto(
+    chatId: number,
+    imageData: Uint8Array,
+    filename: string,
+    caption?: string,
+    threadId?: number,
+  ): Promise<TelegramMessage> {
     const form = new FormData();
     form.append("chat_id", String(chatId));
     form.append("photo", new Blob([imageData], { type: "image/jpeg" }), filename);
     if (caption) form.append("caption", caption);
+    if (threadId != null) form.append("message_thread_id", String(threadId));
 
     const res = await fetch(`${this.base}/sendPhoto`, {
       method: "POST",
@@ -98,20 +115,38 @@ export class TelegramClient {
     return json.result;
   }
 
-  async editMessageText(chatId: number, messageId: number, text: string): Promise<void> {
-    await this.call("editMessageText", {
+  async editMessageText(
+    chatId: number,
+    messageId: number,
+    text: string,
+    keyboard?: TelegramInlineKeyboardMarkup,
+  ): Promise<void> {
+    const body: Record<string, unknown> = {
       chat_id: chatId,
       message_id: messageId,
       text,
       parse_mode: "HTML",
+    };
+    if (keyboard) body.reply_markup = keyboard;
+    await this.call("editMessageText", body);
+  }
+
+  async pinChatMessage(chatId: number, messageId: number, disableNotification = true): Promise<void> {
+    await this.call("pinChatMessage", {
+      chat_id: chatId,
+      message_id: messageId,
+      disable_notification: disableNotification,
     });
   }
 
   async sendChatAction(
     chatId: number,
     action: "typing" | "upload_document" | "upload_photo" = "typing",
+    threadId?: number,
   ): Promise<void> {
-    await this.call("sendChatAction", { chat_id: chatId, action });
+    const body: Record<string, unknown> = { chat_id: chatId, action };
+    if (threadId != null) body.message_thread_id = threadId;
+    await this.call("sendChatAction", body);
   }
 
   async sendReaction(chatId: number, messageId: number, emoji: string): Promise<void> {
@@ -137,13 +172,16 @@ export class TelegramClient {
     chatId: number,
     text: string,
     keyboard: TelegramInlineKeyboardMarkup,
+    threadId?: number,
   ): Promise<TelegramMessage> {
-    return this.call<TelegramMessage>("sendMessage", {
+    const body: Record<string, unknown> = {
       chat_id: chatId,
       text,
       parse_mode: "HTML",
       reply_markup: keyboard,
-    });
+    };
+    if (threadId != null) body.message_thread_id = threadId;
+    return this.call<TelegramMessage>("sendMessage", body);
   }
 
   async answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
@@ -162,5 +200,33 @@ export class TelegramClient {
 
   async setMyCommands(commands: TelegramBotCommand[]): Promise<void> {
     await this.call("setMyCommands", { commands });
+  }
+
+  // ─── Forum Topics ───────────────────────────────────────────────────────
+
+  async getChat(chatId: number): Promise<TelegramChatInfo> {
+    return this.call<TelegramChatInfo>("getChat", { chat_id: chatId });
+  }
+
+  async createForumTopic(chatId: number, name: string, iconColor?: number): Promise<TelegramForumTopic> {
+    const body: Record<string, unknown> = { chat_id: chatId, name };
+    if (iconColor != null) body.icon_color = iconColor;
+    return this.call<TelegramForumTopic>("createForumTopic", body);
+  }
+
+  async closeForumTopic(chatId: number, threadId: number): Promise<void> {
+    await this.call("closeForumTopic", { chat_id: chatId, message_thread_id: threadId });
+  }
+
+  async reopenForumTopic(chatId: number, threadId: number): Promise<void> {
+    await this.call("reopenForumTopic", { chat_id: chatId, message_thread_id: threadId });
+  }
+
+  async closeGeneralForumTopic(chatId: number): Promise<void> {
+    await this.call("closeGeneralForumTopic", { chat_id: chatId });
+  }
+
+  async reopenGeneralForumTopic(chatId: number): Promise<void> {
+    await this.call("reopenGeneralForumTopic", { chat_id: chatId });
   }
 }

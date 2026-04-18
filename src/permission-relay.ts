@@ -21,6 +21,7 @@ import { z } from "zod";
 
 const RELAY_PORT = process.env.RELAY_HTTP_PORT;
 const CHAT_ID = process.env.RELAY_CHAT_ID;
+const THREAD_ID = process.env.RELAY_THREAD_ID;
 
 if (!RELAY_PORT || !CHAT_ID) {
   process.stderr.write("❌  permission-relay: RELAY_HTTP_PORT and RELAY_CHAT_ID required\n");
@@ -59,6 +60,7 @@ server.registerTool(
           requestId,
           toolName,
           toolInput: input,
+          ...(THREAD_ID ? { threadId: Number(THREAD_ID) } : {}),
         }),
       });
 

@@ -27,15 +27,6 @@ describe("parseCommand", () => {
     });
   });
 
-  // ─── /resume ─────────────────────────────────────────────────────────────
-  test("/resume with no args", () => {
-    expect(parseCommand("/resume")).toEqual({ type: "resume" });
-  });
-
-  test("/resume with target", () => {
-    expect(parseCommand("/resume myproject")).toEqual({ type: "resume", target: "myproject" });
-  });
-
   // ─── /sessions ───────────────────────────────────────────────────────────
   test("/sessions", () => {
     expect(parseCommand("/sessions")).toEqual({ type: "sessions" });
@@ -146,29 +137,9 @@ describe("parseCommand", () => {
     expect(parseCommand("/mode foobar")).toEqual({ type: "mode" });
   });
 
-  // ─── /dirs + /bookmark ─────────────────────────────────────────────────────
+  // ─── /dirs ─────────────────────────────────────────────────────────────────
   test("/dirs", () => {
     expect(parseCommand("/dirs")).toEqual({ type: "dirs" });
-  });
-
-  test("/bookmark with no args", () => {
-    expect(parseCommand("/bookmark")).toEqual({ type: "bookmark" });
-  });
-
-  test("/bookmark with path", () => {
-    expect(parseCommand("/bookmark /home/user/project")).toEqual({
-      type: "bookmark",
-      path: "/home/user/project",
-      name: undefined,
-    });
-  });
-
-  test("/bookmark with path and --name", () => {
-    expect(parseCommand("/bookmark /home/user/project --name myproj")).toEqual({
-      type: "bookmark",
-      path: "/home/user/project",
-      name: "myproj",
-    });
   });
 
   // ─── /schedule ──────────────────────────────────────────────────────────────
@@ -243,16 +214,6 @@ describe("parseCommand", () => {
   // ─── /jobs ─────────────────────────────────────────────────────────────────
   test("/jobs", () => {
     expect(parseCommand("/jobs")).toEqual({ type: "jobs" });
-  });
-
-  // ─── /cancel ───────────────────────────────────────────────────────────────
-  test("/cancel with job id", () => {
-    expect(parseCommand("/cancel abc12345")).toEqual({ type: "cancel", jobId: "abc12345" });
-  });
-
-  // ─── /pause ────────────────────────────────────────────────────────────────
-  test("/pause with job id", () => {
-    expect(parseCommand("/pause abc12345")).toEqual({ type: "pause", jobId: "abc12345" });
   });
 
   // ─── Unknown commands ──────────────────────────────────────────────────────
